@@ -287,6 +287,31 @@ class RecordConfig:
 """
 
 
+def standby_loop(
+    robot,
+    teleop,
+    teleop_action_processor,
+    robot_action_processor,
+    events,
+    fps: int,
+):
+    """Teleop is live but no data is recorded. Waits for R to start, Esc to stop."""
+    print("\nStandby — position the arm and press R to start recording, Esc to quit.")
+    control_interval = 1 / fps
+    events["start_recording"] = False
+    while not events["start_recording"] and not events["stop_recording"]:
+        start_t = time.perf_counter()
+        obs = robot.get_observation()
+        if teleop is not None and isinstance(teleop, Teleoperator):
+            act = teleop.get_action()
+            act_processed = teleop_action_processor((act, obs))
+            robot_action_to_send = robot_action_processor((act_processed, obs))
+            robot.send_action(robot_action_to_send)
+        elapsed = time.perf_counter() - start_t
+        time.sleep(max(0, control_interval - elapsed))
+    events["start_recording"] = False
+
+
 @safe_stop_image_writer
 def record_loop(
     robot: Robot,
@@ -596,7 +621,20 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         with VideoEncodingManager(dataset):
             recorded_episodes = 0
             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
+                # Wait for R key before recording — teleop is live but nothing is written to disk.
+                standby_loop(
+                    robot=robot,
+                    teleop=teleop,
+                    teleop_action_processor=teleop_action_processor,
+                    robot_action_processor=robot_action_processor,
+                    events=events,
+                    fps=cfg.dataset.fps,
+                )
+                if events["stop_recording"]:
+                    break
+
                 log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
+                print("Recording — press Space to save, D to discard, Esc to quit.")
                 record_loop(
                     robot=robot,
                     events=events,
@@ -615,26 +653,6 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     interpolator=interpolator,
                     display_compressed_images=display_compressed_images,
                 )
-
-                # Execute a few seconds without recording to give time to manually reset the environment
-                # Skip reset for the last episode to be recorded
-                if not events["stop_recording"] and (
-                    (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
-                ):
-                    log_say("Reset the environment", cfg.play_sounds)
-
-                    record_loop(
-                        robot=robot,
-                        events=events,
-                        fps=cfg.dataset.fps,
-                        teleop_action_processor=teleop_action_processor,
-                        robot_action_processor=robot_action_processor,
-                        robot_observation_processor=robot_observation_processor,
-                        teleop=teleop,
-                        control_time_s=cfg.dataset.reset_time_s,
-                        single_task=cfg.dataset.single_task,
-                        display_data=cfg.display_data,
-                    )
 
                 if events["rerecord_episode"]:
                     log_say("Re-record episode", cfg.play_sounds)
