@@ -100,8 +100,19 @@ class DiffusionPolicy(PreTrainedPolicy):
             self._queues[OBS_ENV_STATE] = deque(maxlen=self.config.n_obs_steps)
 
     @torch.no_grad()
-    def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
+    def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None, populate_queues_first: bool = True) -> Tensor:
         """Predict a chunk of actions given environment observations."""
+
+        if ACTION in batch:
+            batch.pop(ACTION)
+
+        if self.config.image_features:
+            batch = dict(batch)
+            batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
+
+        if populate_queues_first:
+            self._queues = populate_queues(self._queues, batch)
+
         # stack n latest observations from the queue
         batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
         actions = self.diffusion.generate_actions(batch, noise=noise)
@@ -141,7 +152,7 @@ class DiffusionPolicy(PreTrainedPolicy):
         self._queues = populate_queues(self._queues, batch)
 
         if len(self._queues[ACTION]) == 0:
-            actions = self.predict_action_chunk(batch, noise=noise)
+            actions = self.predict_action_chunk(batch, noise=noise, populate_queues_first=False)
             self._queues[ACTION].extend(actions.transpose(0, 1))
 
         action = self._queues[ACTION].popleft()
