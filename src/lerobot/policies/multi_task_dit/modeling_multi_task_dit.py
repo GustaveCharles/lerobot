@@ -151,17 +151,25 @@ class MultiTaskDiTPolicy(PreTrainedPolicy):
             self._queues[OBS_IMAGES] = deque(maxlen=self.config.n_obs_steps)
 
     @torch.no_grad()
-    def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
-        """Predict a chunk of actions given environment observations"""
-        self.eval()
+    def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
+        """Predict a chunk of actions given environment observations."""
+        # 1. Consolidate per-camera image keys into observation.images
+        if self.config.image_features:
+            batch = dict(batch)
+            batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
 
-        for k in batch:
-            if k in self._queues:
-                batch[k] = torch.stack(list(self._queues[k]), dim=1)
+        # 2. Remove action from batch (action is output, not input)
+        if ACTION in batch:
+            batch.pop(ACTION)
 
-        actions = self._generate_actions(batch)
+        # 3. Populate observation queues
+        self._queues = populate_queues(self._queues, batch)
+
+        # Stack n latest observations from the queue
+        batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
+        actions = self._generate_actions(batch, noise=noise)
+
         return actions
-
     def _prepare_batch(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         """Prepare batch by stacking image features if needed."""
         if self.config.image_features:
