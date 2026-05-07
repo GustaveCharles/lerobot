@@ -63,12 +63,7 @@ class ACTPolicy(PreTrainedPolicy):
         self.config = config
 
         self.model = ACT(config)
-
-        if config.image_grayscale:
-            self.do_grayscale = True
-            self.grayscale = torchvision.transforms.Grayscale(num_output_channels=3)
-        else:
-            self.do_grayscale = False
+        self._setup_preprocessing(config)
 
         if config.temporal_ensemble_coeff is not None:
             self.temporal_ensembler = ACTTemporalEnsembler(config.temporal_ensemble_coeff, config.chunk_size)
@@ -128,6 +123,42 @@ class ACTPolicy(PreTrainedPolicy):
             self._action_queue.extend(actions.transpose(0, 1))
         return self._action_queue.popleft()
 
+    def _setup_preprocessing(self, config):
+        if config.image_resize_shape is not None:
+            self.do_resize = True
+            self.resize = torchvision.transforms.Resize(
+                size=config.image_resize_shape,
+                interpolation=torchvision.transforms.InterpolationMode.BILINEAR,
+                antialias=True,
+            )
+        else:
+            self.do_resize = False
+
+        if config.image_crop_shape is not None:
+            self.do_crop = True
+            self.center_crop = torchvision.transforms.CenterCrop(config.image_crop_shape)
+            if config.image_crop_is_random:
+                self.maybe_random_crop = torchvision.transforms.RandomCrop(config.image_crop_shape)
+            else:
+                self.maybe_random_crop = self.center_crop
+        else:
+            self.do_crop = False
+
+        if config.image_grayscale:
+            self.do_grayscale = True
+            self.grayscale = torchvision.transforms.Grayscale(num_output_channels=3)
+        else:
+            self.do_grayscale = False
+
+    def _apply_image_preprocessing(self, images: Tensor) -> Tensor:
+        if self.do_resize:
+            images = self.resize(images)
+        if self.do_crop:
+            images = self.maybe_random_crop(images) if self.training else self.center_crop(images)
+        if self.do_grayscale:
+            images = self.grayscale(images)
+        return images
+
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
         """Predict a chunk of actions given environment observations."""
@@ -135,9 +166,7 @@ class ACTPolicy(PreTrainedPolicy):
 
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
-            batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
-            if self.do_grayscale:
-                batch[OBS_IMAGES] = [self.grayscale(img) for img in batch[OBS_IMAGES]]
+            batch[OBS_IMAGES] = [self._apply_image_preprocessing(batch[key]) for key in self.config.image_features]
 
         actions = self.model(batch)[0]
         return actions
@@ -146,9 +175,7 @@ class ACTPolicy(PreTrainedPolicy):
         """Run the batch through the model and compute the loss for training or validation."""
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
-            batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
-            if self.do_grayscale:
-                batch[OBS_IMAGES] = [self.grayscale(img) for img in batch[OBS_IMAGES]]
+            batch[OBS_IMAGES] = [self._apply_image_preprocessing(batch[key]) for key in self.config.image_features]
 
         actions_hat, (mu_hat, log_sigma_x2_hat) = self.model(batch)
 
