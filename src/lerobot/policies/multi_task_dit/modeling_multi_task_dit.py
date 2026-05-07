@@ -151,24 +151,24 @@ class MultiTaskDiTPolicy(PreTrainedPolicy):
             self._queues[OBS_IMAGES] = deque(maxlen=self.config.n_obs_steps)
 
     @torch.no_grad()
-    def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
+    def predict_action_chunk(self, batch: dict[str, Tensor], populate_queues_first: bool = True) -> Tensor:
         """Predict a chunk of actions given environment observations."""
-        # 1. Consolidate per-camera image keys into observation.images
-        if self.config.image_features:
-            batch = dict(batch)
-            batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
-
-        # 2. Remove action from batch (action is output, not input)
+        self.eval()
+    
         if ACTION in batch:
+            batch = dict(batch)  # shallow copy to avoid modifying original
             batch.pop(ACTION)
 
-        # 3. Populate observation queues
-        self._queues = populate_queues(self._queues, batch)
+        batch = self._prepare_batch(batch)
 
-        # Stack n latest observations from the queue
-        batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
-        actions = self._generate_actions(batch, noise=noise)
+        if populate_queues_first:
+            self._queues = populate_queues(self._queues, batch)
 
+        for k in batch:
+            if k in self._queues:
+                batch[k] = torch.stack(list(self._queues[k]), dim=1)
+        
+        actions = self._generate_actions(batch)
         return actions
     def _prepare_batch(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         """Prepare batch by stacking image features if needed."""
@@ -190,7 +190,7 @@ class MultiTaskDiTPolicy(PreTrainedPolicy):
         self._queues = populate_queues(self._queues, batch)
 
         if len(self._queues[ACTION]) == 0:
-            actions = self.predict_action_chunk(batch)
+            actions = self.predict_action_chunk(batch, populate_queues_first=False)
             self._queues[ACTION].extend(actions.transpose(0, 1))
 
         action = self._queues[ACTION].popleft()
@@ -696,8 +696,9 @@ class DiffusionObjective(nn.Module):
         loss = F.mse_loss(predicted, target, reduction="none")
 
         if self.do_mask_loss_for_padding and "action_is_pad" in batch:
-            valid_actions = ~batch["action_is_pad"]
-            loss = loss * valid_actions.unsqueeze(-1)
+            mask = ~batch["action_is_pad"].unsqueeze(-1)
+            num_valid = mask.sum() * loss.shape[-1]
+            return (loss * mask).sum() / num_valid.clamp_min(1)
 
         return loss.mean()
 
@@ -760,8 +761,9 @@ class FlowMatchingObjective(nn.Module):
         loss = F.mse_loss(predicted_velocity, target_velocity, reduction="none")
 
         if self.do_mask_loss_for_padding and "action_is_pad" in batch:
-            valid_mask = ~batch["action_is_pad"]
-            loss = loss * valid_mask.unsqueeze(-1)
+            mask = ~batch["action_is_pad"].unsqueeze(-1)
+            num_valid = mask.sum() * loss.shape[-1]
+            return (loss * mask).sum() / num_valid.clamp_min(1)
 
         return loss.mean()
 
