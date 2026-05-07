@@ -64,6 +64,12 @@ class ACTPolicy(PreTrainedPolicy):
 
         self.model = ACT(config)
 
+        if config.image_grayscale:
+            self.do_grayscale = True
+            self.grayscale = torchvision.transforms.Grayscale(num_output_channels=3)
+        else:
+            self.do_grayscale = False
+
         if config.temporal_ensemble_coeff is not None:
             self.temporal_ensembler = ACTTemporalEnsembler(config.temporal_ensemble_coeff, config.chunk_size)
 
@@ -130,6 +136,8 @@ class ACTPolicy(PreTrainedPolicy):
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
+            if self.do_grayscale:
+                batch[OBS_IMAGES] = [self.grayscale(img) for img in batch[OBS_IMAGES]]
 
         actions = self.model(batch)[0]
         return actions
@@ -139,6 +147,8 @@ class ACTPolicy(PreTrainedPolicy):
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
+            if self.do_grayscale:
+                batch[OBS_IMAGES] = [self.grayscale(img) for img in batch[OBS_IMAGES]]
 
         actions_hat, (mu_hat, log_sigma_x2_hat) = self.model(batch)
 

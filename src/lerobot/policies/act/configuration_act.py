@@ -122,6 +122,8 @@ class ACTConfig(PreTrainedConfig):
     dropout: float = 0.1
     kl_weight: float = 10.0
 
+    image_grayscale: bool = False  # Convert images to grayscale (3-ch output, applied at train AND inference)
+
     # Training preset
     optimizer_lr: float = 1e-5
     optimizer_weight_decay: float = 1e-4
