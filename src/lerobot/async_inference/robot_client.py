@@ -162,6 +162,12 @@ class RobotClient:
 
             self.stub.SendPolicyInstructions(policy_setup)
 
+            if self.config.home_position:
+                self.logger.info(f"Home position config: {self.config.home_position}")
+                self._goto_home()
+            else:
+                self.logger.info("No home position configured, skipping homing.")
+
             self.shutdown_event.clear()
 
             return True
@@ -169,6 +175,17 @@ class RobotClient:
         except grpc.RpcError as e:
             self.logger.error(f"Failed to connect to policy server: {e}")
             return False
+
+    def _goto_home(self) -> None:
+        """Drive the robot to the home position and hold until it settles."""
+        target = self.config.home_position
+        total_time = self.config.home_steps * self.config.home_step_dt
+        self.logger.info(f"Moving to home position: {target} (holding for {total_time:.1f}s)...")
+        deadline = time.perf_counter() + total_time
+        while time.perf_counter() < deadline:
+            self.robot.send_action(target)
+            time.sleep(self.config.home_step_dt)
+        self.logger.info("Home position reached.")
 
     def stop(self):
         """Stop the robot client"""

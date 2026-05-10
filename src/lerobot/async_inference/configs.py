@@ -143,6 +143,16 @@ class RobotClientConfig:
         metadata={"help": f"Name of aggregate function to use. Options: {list(AGGREGATE_FUNCTIONS.keys())}"},
     )
 
+    # Home position: JSON string mapping joint names to target degrees.
+    # Example:
+    #   --home_position='{"shoulder_pan.pos": -3.3, "shoulder_lift.pos": -67.78, ...}'
+    # Leave empty to skip homing.
+    home_position: dict[str, float] | None = field(
+        default=None, metadata={"help": "Target joint positions (degrees) to reach before inference"}
+    )
+    home_steps: int = field(default=50, metadata={"help": "Number of send_action calls when moving to home"})
+    home_step_dt: float = field(default=0.02, metadata={"help": "Seconds between each send_action call"})
+
     # Debug configuration
     debug_visualize_queue_size: bool = field(
         default=False, metadata={"help": "Visualize the action queue size"}
