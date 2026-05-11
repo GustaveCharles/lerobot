@@ -75,6 +75,7 @@ class MultiTaskDiTConfig(PreTrainedConfig):
     image_resize_shape: tuple[int, int] | None = None  # Resize images before crop
     image_crop_shape: tuple[int, int] | None = (224, 224)  # Crop shape (CLIP default)
     image_crop_is_random: bool = True  # Random crop during training, center at inference
+    image_grayscale: bool = False  # Convert images to grayscale (3-ch output, applied at train AND inference)
 
     # Text Encoder (CLIP)
     text_encoder_name: str = "openai/clip-vit-base-patch16"  # HuggingFace CLIP model

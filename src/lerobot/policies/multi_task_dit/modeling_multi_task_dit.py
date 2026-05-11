@@ -151,7 +151,7 @@ class MultiTaskDiTPolicy(PreTrainedPolicy):
             self._queues[OBS_IMAGES] = deque(maxlen=self.config.n_obs_steps)
 
     @torch.no_grad()
-    def predict_action_chunk(self, batch: dict[str, Tensor], populate_queues_first: bool = True) -> Tensor:
+    def predict_action_chunk(self, batch: dict[str, Tensor], populate_queues_first: bool = True, **kwargs) -> Tensor:
         """Predict a chunk of actions given environment observations."""
         self.eval()
     
@@ -304,6 +304,8 @@ class ObservationEncoder(nn.Module):
             images = self.resize(images)
         if self.do_crop:
             images = self.maybe_random_crop(images) if self.training else self.center_crop(images)
+        if self.do_grayscale:
+            images = self.grayscale(images)
         return images
 
     def _setup_preprocessing(self, config):
@@ -326,6 +328,12 @@ class ObservationEncoder(nn.Module):
                 self.maybe_random_crop = self.center_crop
         else:
             self.do_crop = False
+
+        if config.image_grayscale:
+            self.do_grayscale = True
+            self.grayscale = torchvision.transforms.Grayscale(num_output_channels=3)
+        else:
+            self.do_grayscale = False
 
     def _setup_vector_output(self):
         total_dim = 0

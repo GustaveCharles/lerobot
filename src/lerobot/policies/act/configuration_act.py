@@ -122,6 +122,11 @@ class ACTConfig(PreTrainedConfig):
     dropout: float = 0.1
     kl_weight: float = 10.0
 
+    image_resize_shape: tuple[int, int] | None = None  # Resize images before crop
+    image_crop_shape: tuple[int, int] | None = None  # Optional crop after resize
+    image_crop_is_random: bool = True  # Random crop during training, center crop at inference
+    image_grayscale: bool = False  # Convert images to grayscale (3-ch output, applied at train AND inference)
+
     # Training preset
     optimizer_lr: float = 1e-5
     optimizer_weight_decay: float = 1e-4
