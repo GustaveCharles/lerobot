@@ -65,6 +65,24 @@ from .utils import (
 from .video_utils import encode_video_frames, get_video_info
 
 
+def _build_episode_stats_index(src_dataset: LeRobotDataset) -> dict[int, dict]:
+    """Scan all meta/episodes parquet files and return a mapping episode_index → row dict.
+
+    Used instead of trusting ep_meta["meta/episodes/file_index"], which can be wrong in
+    datasets assembled with recording pipeline bugs.
+    """
+    index: dict[int, dict] = {}
+    episodes_dir = src_dataset.root / "meta" / "episodes"
+    for parquet_file in sorted(episodes_dir.glob("*/*.parquet")):
+        df = pd.read_parquet(parquet_file)
+        for _, row in df.iterrows():
+            index[int(row["episode_index"])] = row.to_dict()
+    return index
+
+
+_episode_stats_cache: dict[str, dict[int, dict]] = {}
+
+
 def _load_episode_with_stats(src_dataset: LeRobotDataset, episode_idx: int) -> dict:
     """Load a single episode's metadata including stats from parquet file.
 
@@ -75,16 +93,16 @@ def _load_episode_with_stats(src_dataset: LeRobotDataset, episode_idx: int) -> d
     Returns:
         dict containing episode metadata and stats
     """
-    ep_meta = src_dataset.meta.episodes[episode_idx]
-    chunk_idx = ep_meta["meta/episodes/chunk_index"]
-    file_idx = ep_meta["meta/episodes/file_index"]
+    cache_key = str(src_dataset.root)
+    if cache_key not in _episode_stats_cache:
+        _episode_stats_cache[cache_key] = _build_episode_stats_index(src_dataset)
 
-    parquet_path = src_dataset.root / DEFAULT_EPISODES_PATH.format(chunk_index=chunk_idx, file_index=file_idx)
-    df = pd.read_parquet(parquet_path)
-
-    episode_row = df[df["episode_index"] == episode_idx].iloc[0]
-
-    return episode_row.to_dict()
+    index = _episode_stats_cache[cache_key]
+    if episode_idx not in index:
+        raise KeyError(
+            f"Episode {episode_idx} not found in any meta/episodes parquet file under {src_dataset.root}"
+        )
+    return index[episode_idx]
 
 
 def delete_episodes(
@@ -495,12 +513,20 @@ def _copy_and_reindex_data(
     if src_dataset.meta.episodes is None:
         src_dataset.meta.episodes = load_episodes(src_dataset.meta.root)
 
+    # Build the file→episodes mapping by scanning actual parquet files rather than
+    # trusting episode metadata file indices, which can be wrong in datasets assembled
+    # with recording pipeline bugs (wrong data/file_index in episodes.jsonl).
     file_to_episodes: dict[Path, set[int]] = {}
-    for old_idx in episode_mapping:
-        file_path = src_dataset.meta.get_data_file_path(old_idx)
-        if file_path not in file_to_episodes:
-            file_to_episodes[file_path] = set()
-        file_to_episodes[file_path].add(old_idx)
+    data_dir = src_dataset.root / "data"
+    for parquet_file in sorted(data_dir.glob("*/*.parquet")):
+        rel_path = parquet_file.relative_to(src_dataset.root)
+        df_scan = pd.read_parquet(parquet_file, columns=["episode_index"])
+        for ep_idx in df_scan["episode_index"].unique():
+            ep_idx_int = int(ep_idx)
+            if ep_idx_int in episode_mapping:
+                if rel_path not in file_to_episodes:
+                    file_to_episodes[rel_path] = set()
+                file_to_episodes[rel_path].add(ep_idx_int)
 
     global_index = 0
     episode_data_metadata: dict[int, dict] = {}
@@ -528,15 +554,15 @@ def _copy_and_reindex_data(
         all_episodes_in_file = set(df["episode_index"].unique())
         episodes_to_keep = file_to_episodes[src_path]
 
+        # Parse chunk/file indices from the path (e.g. data/chunk-000/file-007.parquet)
+        # rather than from episode metadata, which may have wrong file indices.
+        chunk_idx = int(src_path.parent.name.split("-")[1])
+        file_idx = int(src_path.stem.split("-")[1])
+
         if all_episodes_in_file == episodes_to_keep:
             df["episode_index"] = df["episode_index"].replace(episode_mapping)
             df["index"] = range(global_index, global_index + len(df))
             df["task_index"] = df["task_index"].replace(task_mapping)
-
-            first_ep_old_idx = min(episodes_to_keep)
-            src_ep = src_dataset.meta.episodes[first_ep_old_idx]
-            chunk_idx = src_ep["data/chunk_index"]
-            file_idx = src_ep["data/file_index"]
         else:
             mask = df["episode_index"].isin(list(episode_mapping.keys()))
             df = df[mask].copy().reset_index(drop=True)
@@ -548,11 +574,6 @@ def _copy_and_reindex_data(
             df["index"] = range(global_index, global_index + len(df))
             df["task_index"] = df["task_index"].replace(task_mapping)
 
-            first_ep_old_idx = min(episodes_to_keep)
-            src_ep = src_dataset.meta.episodes[first_ep_old_idx]
-            chunk_idx = src_ep["data/chunk_index"]
-            file_idx = src_ep["data/file_index"]
-
         dst_path = dst_meta.root / DEFAULT_DATA_PATH.format(chunk_index=chunk_idx, file_index=file_idx)
         dst_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -561,6 +582,12 @@ def _copy_and_reindex_data(
         for ep_old_idx in episodes_to_keep:
             ep_new_idx = episode_mapping[ep_old_idx]
             ep_df = df[df["episode_index"] == ep_new_idx]
+            if len(ep_df) == 0:
+                logging.warning(
+                    f"Episode {ep_old_idx} (new idx {ep_new_idx}) has no data rows in {src_path}. "
+                    "Metadata inconsistency in source dataset — skipping data metadata for this episode."
+                )
+                continue
             episode_data_metadata[ep_new_idx] = {
                 "data/chunk_index": chunk_idx,
                 "data/file_index": file_idx,
@@ -768,9 +795,12 @@ def _copy_and_reindex_videos(
                     src_ep = src_dataset.meta.episodes[old_idx]
                     from_frame = round(src_ep[f"videos/{video_key}/from_timestamp"] * src_dataset.meta.fps)
                     to_frame = round(src_ep[f"videos/{video_key}/to_timestamp"] * src_dataset.meta.fps)
-                    assert src_ep["length"] == to_frame - from_frame, (
-                        f"Episode length mismatch: {src_ep['length']} vs {to_frame - from_frame}"
-                    )
+                    if src_ep["length"] != to_frame - from_frame:
+                        logging.warning(
+                            f"Episode {old_idx} ({video_key}): metadata length {src_ep['length']} != "
+                            f"timestamp-derived length {to_frame - from_frame}. "
+                            "Likely trailing frames in video not written to parquet. Using timestamp range."
+                        )
                     episodes_to_keep_ranges.append((from_frame, to_frame))
 
                 # Use PyAV filters to efficiently re-encode only the desired segments.

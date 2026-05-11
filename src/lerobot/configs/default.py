@@ -34,6 +34,9 @@ class DatasetConfig:
     image_transforms: ImageTransformsConfig = field(default_factory=ImageTransformsConfig)
     revision: str | None = None
     use_imagenet_stats: bool = True
+    # Path to a JSON file with pre-computed stats to overlay on top of the dataset's default stats.json.
+    # Used to supply relative-action stats without overwriting the original stats.json on disk.
+    stats_override_path: str | None = None
     video_backend: str = field(default_factory=get_safe_default_codec)
     # When True, video frames are returned as uint8 tensors (0-255) instead of float32 (0.0-1.0).
     # This reduces memory and speeds up DataLoader IPC. The training pipeline handles the conversion.

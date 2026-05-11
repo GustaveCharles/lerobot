@@ -95,6 +95,51 @@ class RandomSubsetApply(Transform):
         )
 
 
+class WarmthJitter(Transform):
+    """Randomly shift the color temperature of an image.
+
+    A positive warmth factor boosts red and suppresses blue (warm/orange tint).
+    A negative factor boosts blue and suppresses red (cool/blue tint).
+    The green channel is shifted at 20% of the warmth factor, matching typical
+    incandescent vs. daylight spectral profiles.
+
+    Args:
+        warmth: Range [min, max] for the warmth factor. Negative values produce
+            cool shifts, positive values produce warm shifts. Should satisfy min <= max.
+    """
+
+    def __init__(self, warmth: float | Sequence[float]) -> None:
+        super().__init__()
+        self.warmth = self._check_input(warmth)
+
+    def _check_input(self, warmth):
+        if isinstance(warmth, (int, float)):
+            warmth = [-abs(float(warmth)), abs(float(warmth))]
+        elif isinstance(warmth, collections.abc.Sequence) and len(warmth) == 2:
+            warmth = [float(v) for v in warmth]
+        else:
+            raise TypeError(f"{warmth=} should be a single number or a sequence with length 2.")
+        if warmth[0] > warmth[1]:
+            raise ValueError(f"warmth[0] must be <= warmth[1], got {warmth}.")
+        return tuple(warmth)
+
+    def make_params(self, flat_inputs: list[Any]) -> dict[str, Any]:
+        t = torch.empty(1).uniform_(self.warmth[0], self.warmth[1]).item()
+        return {"warmth_factor": t}
+
+    def transform(self, inpt: Any, params: dict[str, Any]) -> Any:
+        if not isinstance(inpt, torch.Tensor) or inpt.shape[-3] < 3:
+            return inpt
+        t = params["warmth_factor"]
+        bound = 1.0 if inpt.is_floating_point() else 255.0
+        img = inpt.float()
+        result = img.clone()
+        result[..., 0, :, :] = (img[..., 0, :, :] * (1.0 + t)).clamp(0, bound)
+        result[..., 1, :, :] = (img[..., 1, :, :] * (1.0 + 0.2 * t)).clamp(0, bound)
+        result[..., 2, :, :] = (img[..., 2, :, :] * (1.0 - t)).clamp(0, bound)
+        return result.to(inpt.dtype)
+
+
 class SharpnessJitter(Transform):
     """Randomly change the sharpness of an image or video.
 
@@ -218,6 +263,8 @@ class ImageTransformsConfig:
 def make_transform_from_config(cfg: ImageTransformConfig):
     if cfg.type == "SharpnessJitter":
         return SharpnessJitter(**cfg.kwargs)
+    if cfg.type == "WarmthJitter":
+        return WarmthJitter(**cfg.kwargs)
 
     transform_cls = getattr(v2, cfg.type, None)
     if isinstance(transform_cls, type) and issubclass(transform_cls, Transform):
@@ -225,7 +272,7 @@ def make_transform_from_config(cfg: ImageTransformConfig):
 
     raise ValueError(
         f"Transform '{cfg.type}' is not valid. It must be a class in "
-        f"torchvision.transforms.v2 or 'SharpnessJitter'."
+        f"torchvision.transforms.v2, 'SharpnessJitter', or 'WarmthJitter'."
     )
 
 

@@ -76,6 +76,12 @@ class MultiTaskDiTConfig(PreTrainedConfig):
     image_crop_shape: tuple[int, int] | None = (224, 224)  # Crop shape (CLIP default)
     image_crop_is_random: bool = True  # Random crop during training, center at inference
     image_grayscale: bool = False  # Convert images to grayscale (3-ch output, applied at train AND inference)
+    image_grayworld: bool = False  # Gray-world white-balance normalization (applied at train AND inference, before grayscale)
+
+    # Relative actions
+    use_relative_actions: bool = False  # Predict deltas (action - state) instead of absolute positions
+    relative_exclude_joints: list[str] = field(default_factory=lambda: ["gripper"])  # Joints kept absolute
+    action_feature_names: list[str] | None = None  # Per-dim action names, used to build the relative mask
 
     # Text Encoder (CLIP)
     text_encoder_name: str = "openai/clip-vit-base-patch16"  # HuggingFace CLIP model

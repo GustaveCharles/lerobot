@@ -13,7 +13,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import logging
+from pathlib import Path
 from pprint import pformat
 
 import torch
@@ -128,5 +130,21 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
         for key in dataset.meta.camera_keys:
             for stats_type, stats in IMAGENET_STATS.items():
                 dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
+
+    if cfg.dataset.stats_override_path is not None:
+        override_path = Path(cfg.dataset.stats_override_path)
+        if not override_path.exists():
+            raise FileNotFoundError(
+                f"stats_override_path '{override_path}' not found. "
+                "Run scripts/recompute_stats_relative.py first."
+            )
+        with open(override_path) as f:
+            overrides = json.load(f)
+        for feature_key, feature_stats in overrides.items():
+            if feature_key not in dataset.meta.stats:
+                dataset.meta.stats[feature_key] = {}
+            for stats_type, values in feature_stats.items():
+                dataset.meta.stats[feature_key][stats_type] = torch.tensor(values, dtype=torch.float32)
+        logging.info(f"Applied stats overrides from '{override_path}' for: {list(overrides.keys())}")
 
     return dataset

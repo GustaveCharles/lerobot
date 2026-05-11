@@ -304,9 +304,19 @@ class ObservationEncoder(nn.Module):
             images = self.resize(images)
         if self.do_crop:
             images = self.maybe_random_crop(images) if self.training else self.center_crop(images)
+        if self.do_grayworld:
+            images = self._grayworld_normalize(images)
         if self.do_grayscale:
             images = self.grayscale(images)
         return images
+
+    @staticmethod
+    def _grayworld_normalize(images: Tensor) -> Tensor:
+        # images: [..., C, H, W] float in [0, 1]
+        channel_means = images.mean(dim=(-2, -1), keepdim=True)  # [..., C, 1, 1]
+        overall_mean = channel_means.mean(dim=-3, keepdim=True)  # [..., 1, 1, 1]
+        scale = overall_mean / (channel_means + 1e-6)
+        return (images * scale).clamp(0, 1)
 
     def _setup_preprocessing(self, config):
         if config.image_resize_shape is not None:
@@ -328,6 +338,8 @@ class ObservationEncoder(nn.Module):
                 self.maybe_random_crop = self.center_crop
         else:
             self.do_crop = False
+
+        self.do_grayworld = getattr(config, "image_grayworld", False)
 
         if config.image_grayscale:
             self.do_grayscale = True
