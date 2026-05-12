@@ -51,6 +51,9 @@ def to_relative_actions(actions: Tensor, state: Tensor, mask: Sequence[bool]) ->
     # DeviceProcessorStep moves the transition, so it can be on CPU while actions are on CUDA.
     if state.device != actions.device or state.dtype != actions.dtype:
         state = state.to(device=actions.device, dtype=actions.dtype)
+    # State may arrive as (B, n_obs_steps, state_dim); use the first (current) timestep.
+    if state.ndim == 3:
+        state = state[:, 0]
     state_offset = state[..., :dims] * mask_t
     if actions.ndim == 3:
         state_offset = state_offset.unsqueeze(-2)
@@ -73,6 +76,9 @@ def to_absolute_actions(actions: Tensor, state: Tensor, mask: Sequence[bool]) ->
     # DeviceProcessorStep moves the transition, so it can be on CPU while actions are on CUDA.
     if state.device != actions.device or state.dtype != actions.dtype:
         state = state.to(device=actions.device, dtype=actions.dtype)
+    # State may arrive as (B, n_obs_steps, state_dim); use the first (current) timestep.
+    if state.ndim == 3:
+        state = state[:, 0]
     state_offset = state[..., :dims] * mask_t
     if actions.ndim == 3:
         state_offset = state_offset.unsqueeze(-2)
