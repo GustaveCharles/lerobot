@@ -142,8 +142,10 @@ class MultiTaskDiTPolicy(PreTrainedPolicy):
 
     def reset(self):
         """Clear observation and action queues. Should be called on `env.reset()`"""
+        # State queue must hold enough history for lag-diff features.
+        state_queue_maxlen = len(self.config.state_delta_indices)
         self._queues = {
-            OBS_STATE: deque(maxlen=self.config.n_obs_steps),
+            OBS_STATE: deque(maxlen=state_queue_maxlen),
             ACTION: deque(maxlen=self.config.n_action_steps),
         }
 
@@ -167,9 +169,58 @@ class MultiTaskDiTPolicy(PreTrainedPolicy):
         for k in batch:
             if k in self._queues:
                 batch[k] = torch.stack(list(self._queues[k]), dim=1)
-        
+        if self.config.has_state_history:
+            batch = self._augment_state(batch)
         actions = self._generate_actions(batch)
         return actions
+    def _augment_state(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Slice OBS_STATE to n_obs_steps main timesteps and append tanh-scaled lag-diff features.
+
+        For each (motor m, lag l): f = tanh((q[t-l][m] - q[t][m]) / s_{m,l})
+
+        Input shape: [B, len(state_delta_indices), state_dim]
+        Output shape: [B, n_obs_steps, augmented_state_dim]
+        """
+        if not self.config.has_state_history:
+            return batch
+        cfg = self.config
+        state = batch[OBS_STATE]
+        state_deltas = cfg.state_delta_indices
+        obs_deltas = cfg.observation_delta_indices
+        motors = cfg.state_history_motors
+        lags = cfg.state_history_lags
+
+        # Per-feature scales (ordered: motor0_lag0, motor0_lag1, ..., motor1_lag0, ...)
+        expected_n_scales = len(motors) * len(lags)
+        if len(cfg.state_history_scales) != expected_n_scales:
+            raise ValueError(
+                f"state_history_scales must have length {expected_n_scales} "
+                f"({len(motors)} motors × {len(lags)} lags), got {len(cfg.state_history_scales)}"
+            )
+        scales = torch.tensor(cfg.state_history_scales, dtype=state.dtype, device=state.device)  # [M*L]
+
+        main_indices = [state_deltas.index(d) for d in obs_deltas]
+        current_idx = state_deltas.index(0)
+        current_motors = state[:, current_idx, motors]  # [B, M]
+
+        # Build (q[t-lag] - q[t]) for each (motor, lag), ordered motor-major
+        features = []
+        for m_idx, m in enumerate(motors):
+            cur_m = current_motors[:, m_idx]  # [B]
+            for lag in lags:
+                past_idx = state_deltas.index(-lag)
+                past_m = state[:, past_idx, m]  # [B]
+                features.append(past_m - cur_m)  # sign matches spec: past - current
+        feat_cat = torch.stack(features, dim=-1)  # [B, M*L]
+        feat_scaled = torch.tanh(feat_cat / scales)  # [B, M*L]
+
+        # Slice to main n_obs_steps and broadcast features across time
+        state_main = state[:, main_indices]  # [B, n_obs_steps, state_dim]
+        feat_expanded = feat_scaled.unsqueeze(1).expand(-1, state_main.shape[1], -1)
+        new_batch = dict(batch)
+        new_batch[OBS_STATE] = torch.cat([state_main, feat_expanded], dim=-1)
+        return new_batch
+
     def _prepare_batch(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         """Prepare batch by stacking image features if needed."""
         if self.config.image_features:
@@ -199,6 +250,8 @@ class MultiTaskDiTPolicy(PreTrainedPolicy):
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict | None]:
         """Run the batch through the model and compute the loss for training"""
         batch = self._prepare_batch(batch)
+        if self.config.has_state_history:
+            batch = self._augment_state(batch)
 
         conditioning_vec = self.observation_encoder.encode(batch)
         loss = self.objective.compute_loss(self.noise_predictor, batch, conditioning_vec)
@@ -290,7 +343,8 @@ class ObservationEncoder(nn.Module):
             self.num_cameras = 0
 
         if hasattr(config, "robot_state_feature") and config.robot_state_feature:
-            self.robot_state_dim = config.robot_state_feature.shape[0]
+            # augmented_state_dim = base + len(motors)*len(lags) when state history enabled
+            self.robot_state_dim = config.augmented_state_dim
         else:
             self.robot_state_dim = 0
 

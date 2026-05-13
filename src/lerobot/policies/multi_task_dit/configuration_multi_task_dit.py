@@ -31,6 +31,19 @@ class MultiTaskDiTConfig(PreTrainedConfig):
     """
 
     n_obs_steps: int = 2  # Number of observation steps for temporal context
+    obs_stride: int = 1  # Frame stride between observation steps (1 = consecutive frames)
+    # State history: feed tanh-scaled lag-differences of selected motors as extra state dims.
+    # f(joint, lag) = tanh((q[t-lag] - q[t]) / s)  ← bounded, smooth, position-invariant
+    # Example: state_history_motors=[0,5] state_history_lags=[5,10] adds 4 dims:
+    #   tanh((q[t-5][0]-q[t][0])/s0), tanh((q[t-10][0]-q[t][0])/s0),
+    #   tanh((q[t-5][5]-q[t][5])/s1), tanh((q[t-10][5]-q[t][5])/s1)
+    state_history_motors: list[int] = field(default_factory=list)
+    state_history_lags: list[int] = field(default_factory=list)
+    # Per-feature scales s for tanh normalization. Flat list ordered as:
+    # [motor0_lag0, motor0_lag1, ..., motor1_lag0, motor1_lag1, ...]
+    # length = len(state_history_motors) * len(state_history_lags)
+    # Compute on training split via scripts/compute_state_history_scales.py.
+    state_history_scales: list[float] = field(default_factory=list)
     horizon: int = 32  # Number of action steps to predict
     n_action_steps: int = 24  # Actions executed per policy call (~0.8s at 30Hz)
 
@@ -250,7 +263,28 @@ class MultiTaskDiTConfig(PreTrainedConfig):
 
     @property
     def observation_delta_indices(self) -> list:
-        return list(range(1 - self.n_obs_steps, 1))
+        """Used for image features. With stride s: [-(n-1)*s, ..., -s, 0]."""
+        return [-(self.n_obs_steps - 1 - i) * self.obs_stride for i in range(self.n_obs_steps)]
+
+    @property
+    def state_delta_indices(self) -> list:
+        """Used for observation.state — includes lag timesteps if state history enabled."""
+        base = self.observation_delta_indices
+        if self.state_history_lags:
+            return sorted(set(base + [-l for l in self.state_history_lags]))
+        return base
+
+    @property
+    def has_state_history(self) -> bool:
+        return bool(self.state_history_motors) and bool(self.state_history_lags)
+
+    @property
+    def augmented_state_dim(self) -> int:
+        """State input dim after appending lag-diff features."""
+        base = self.robot_state_feature.shape[0] if self.robot_state_feature else 0
+        if self.has_state_history:
+            return base + len(self.state_history_motors) * len(self.state_history_lags)
+        return base
 
     @property
     def action_delta_indices(self) -> list:
