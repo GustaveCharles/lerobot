@@ -102,6 +102,7 @@ class MultiTaskDiTConfig(PreTrainedConfig):
     tokenizer_padding: str = "max_length"  # Padding strategy: "max_length" or "longest"
     tokenizer_padding_side: str = "right"  # Padding side: "left" or "right"
     tokenizer_truncation: bool = True  # Whether to truncate sequences longer than max_length
+    default_task: str | None = None  # Fallback task string when dataset has no task annotation
 
     # Normalization
     normalization_mapping: dict[str, NormalizationMode] = field(

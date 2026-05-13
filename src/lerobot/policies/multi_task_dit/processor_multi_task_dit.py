@@ -86,6 +86,7 @@ def make_multi_task_dit_pre_post_processors(
             padding_side=config.tokenizer_padding_side,
             max_length=config.tokenizer_max_length,
             truncation=config.tokenizer_truncation,
+            default_task=getattr(config, "default_task", None),
         ),
         DeviceProcessorStep(device=config.device),
         relative_step,

@@ -81,6 +81,7 @@ class TokenizerProcessorStep(ObservationProcessorStep):
     padding_side: str = "right"
     padding: str = "max_length"
     truncation: bool = True
+    default_task: str | None = None  # Used when the dataset has no task annotation
 
     # Internal tokenizer instance (not part of the config)
     input_tokenizer: Any = field(default=None, init=False, repr=False)
@@ -131,13 +132,16 @@ class TokenizerProcessorStep(ObservationProcessorStep):
 
         task = complementary_data[self.task_key]
         if task is None:
+            if self.default_task is not None:
+                return [self.default_task]
             raise ValueError("Task extracted from Complementary data is None")
 
-        # Standardize to a list of strings for the tokenizer
+        # Standardize to a list of strings for the tokenizer.
+        # Convert elements to str to handle numpy.str_, pandas string types, etc.
         if isinstance(task, str):
             return [task]
-        elif isinstance(task, (list, tuple)) and all(isinstance(t, str) for t in task):
-            return list(task)
+        elif isinstance(task, (list, tuple)):
+            return [str(t) for t in task]
 
         return None
 
