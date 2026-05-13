@@ -137,11 +137,13 @@ class TokenizerProcessorStep(ObservationProcessorStep):
             raise ValueError("Task extracted from Complementary data is None")
 
         # Standardize to a list of strings for the tokenizer.
-        # Convert elements to str to handle numpy.str_, pandas string types, etc.
+        # Convert elements to str to handle numpy.str_, numpy.ndarray, pandas types, etc.
         if isinstance(task, str):
             return [task]
-        elif isinstance(task, (list, tuple)):
+        try:
             return [str(t) for t in task]
+        except TypeError:
+            pass
 
         return None
 
