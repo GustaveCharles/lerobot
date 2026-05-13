@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -107,7 +108,12 @@ class RelativeActionsProcessorStep(ProcessorStep):
     enabled: bool = False
     exclude_joints: list[str] = field(default_factory=list)
     action_names: list[str] | None = None
+    # Size of the observation window used at training time (matches the policy's
+    # observation_delta_indices). The cached reference state is the oldest entry of a
+    # FIFO of this length — see __call__ for the full rationale.
+    n_obs_steps: int = 2
     _last_state: torch.Tensor | None = field(default=None, init=False, repr=False)
+    _state_buffer: deque | None = field(default=None, init=False, repr=False)
 
     def _build_mask(self, action_dim: int) -> list[bool]:
         if not self.exclude_joints or self.action_names is None:
@@ -132,9 +138,33 @@ class RelativeActionsProcessorStep(ProcessorStep):
         observation = transition.get(TransitionKey.OBSERVATION, {})
         state = observation.get(OBS_STATE) if observation else None
 
-        # Always cache state for the paired AbsoluteActionsProcessorStep
+        # Cache the reference state that the paired AbsoluteActionsProcessorStep will
+        # use to invert the relative encoding. To keep training and inference numerically
+        # consistent we must cache the SAME reference that `to_relative_actions` uses
+        # internally — currently `state[:, 0]` (oldest step in the n_obs_steps window).
+        #
+        # - At training, `state` arrives 3D (B, n_obs_steps, state_dim) thanks to the
+        #   dataset's delta_timestamps; we cache state[:, 0] directly.
+        # - At inference, the policy pipeline feeds a single observation per control
+        #   cycle, so we maintain a FIFO of length n_obs_steps and cache its oldest
+        #   entry. After cold start (buffer pre-padded with the first observation) this
+        #   replicates training's stacking: oldest entry == state from (n_obs_steps - 1)
+        #   cycles ago.
+        #
+        # NOTE: this is a temporary workaround — the semantically correct fix is to make
+        # both to_relative_actions / to_absolute_actions use state[:, -1] (the CURRENT
+        # observation) and retrain. See branch <name>/fix-relative-actions-current.
         if state is not None:
-            self._last_state = state
+            if state.ndim == 3:
+                self._last_state = state[:, 0]
+            else:
+                if self._state_buffer is None or self._state_buffer.maxlen != self.n_obs_steps:
+                    self._state_buffer = deque(maxlen=self.n_obs_steps)
+                # cold-start padding: fill so the oldest slot is populated immediately
+                while len(self._state_buffer) < self.n_obs_steps:
+                    self._state_buffer.append(state)
+                self._state_buffer.append(state)
+                self._last_state = self._state_buffer[0]
 
         if not self.enabled:
             return transition
@@ -147,6 +177,11 @@ class RelativeActionsProcessorStep(ProcessorStep):
         mask = self._build_mask(action.shape[-1])
         new_transition[TransitionKey.ACTION] = to_relative_actions(action, state, mask)
         return new_transition
+
+    def reset(self) -> None:
+        """Clear the inference-time state FIFO at episode boundaries."""
+        self._state_buffer = None
+        self._last_state = None
 
     def get_cached_state(self) -> torch.Tensor | None:
         """Return the cached ``observation.state`` used as the reference point for relative/absolute action conversions."""
