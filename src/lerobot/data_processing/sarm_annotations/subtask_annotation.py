@@ -424,9 +424,14 @@ class VideoAnnotator:
 
             for attempt in range(max_retries):
                 try:
-                    text = self.processor.apply_chat_template(
-                        messages, tokenize=False, add_generation_prompt=True
-                    )
+                    try:
+                        text = self.processor.apply_chat_template(
+                            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+                        )
+                    except TypeError:
+                        text = self.processor.apply_chat_template(
+                            messages, tokenize=False, add_generation_prompt=True
+                        )
                     image_inputs, video_inputs = process_vision_info(messages)
                     inputs = self.processor(
                         text=[text],
@@ -445,6 +450,9 @@ class VideoAnnotator:
                         [out[len(inp) :] for inp, out in zip(inputs.input_ids, generated_ids, strict=True)],
                         skip_special_tokens=True,
                     )[0].strip()
+
+                    # Strip Qwen3 thinking blocks
+                    response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
 
                     # Extract JSON
                     if "```json" in response:
