@@ -119,6 +119,9 @@ class SARMEncodingProcessorStep(ProcessorStep):
         self.verbs = ["move", "grasp", "rotate", "push", "pull", "slide", "lift", "place"]
         self.fake = Faker()
 
+        self.do_grayworld = getattr(config, "image_grayworld", False)
+        self.do_grayscale  = getattr(config, "image_grayscale", False)
+
     def _find_episode_for_frame(self, frame_idx: int) -> int:
         """Find the episode index for a given frame index."""
         for ep_idx in range(len(self.dataset_meta.episodes)):
@@ -414,6 +417,20 @@ class SARMEncodingProcessorStep(ProcessorStep):
         """Set evaluation mode (disable augmentations)."""
         return self.train(False)
 
+    @staticmethod
+    def _apply_grayworld(img: np.ndarray) -> np.ndarray:
+        """Gray-world white-balance on a float32 (H, W, 3) image in [0, 1]."""
+        channel_means = img.mean(axis=(0, 1))           # (3,)
+        overall_mean  = channel_means.mean()
+        scale = overall_mean / (channel_means + 1e-6)
+        return np.clip(img * scale, 0.0, 1.0)
+
+    @staticmethod
+    def _apply_grayscale(img: np.ndarray) -> np.ndarray:
+        """Luminance grayscale → 3-channel float32 (H, W, 3) image in [0, 1]."""
+        gray = 0.2989 * img[..., 0] + 0.5870 * img[..., 1] + 0.1140 * img[..., 2]
+        return np.stack([gray, gray, gray], axis=-1)
+
     @torch.no_grad()
     def _encode_images_batch(self, images: np.ndarray) -> torch.Tensor:
         """Encode a batch of images using CLIP.
@@ -439,8 +456,15 @@ class SARMEncodingProcessorStep(ProcessorStep):
             if img.shape[-1] == 1:
                 img = np.repeat(img, 3, axis=-1)
 
-            if img.dtype != np.uint8:
-                img = (img * 255).astype(np.uint8) if img.max() <= 1.0 else img.astype(np.uint8)
+            # Normalise to float [0, 1] for preprocessing, then convert back to uint8 for PIL
+            img_f = img.astype(np.float32) / 255.0 if img.dtype == np.uint8 else (
+                img.astype(np.float32) if img.max() > 1.0 else img.astype(np.float32)
+            )
+            if self.do_grayworld:
+                img_f = self._apply_grayworld(img_f)
+            if self.do_grayscale:
+                img_f = self._apply_grayscale(img_f)
+            img = (img_f * 255).astype(np.uint8)
 
             images_list.append(Image.fromarray(img))
 

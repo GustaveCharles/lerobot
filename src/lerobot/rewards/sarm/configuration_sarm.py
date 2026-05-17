@@ -87,6 +87,10 @@ class SARMConfig(RewardModelConfig):
     image_key: str = OBS_IMAGES + ".top"  # Key for image used from the dataset
     state_key: str = OBS_STATE
 
+    # Image preprocessing applied at BOTH train and inference (must match deployment pipeline).
+    image_grayworld: bool = False   # Gray-world white-balance normalisation (applied before grayscale)
+    image_grayscale: bool = False   # Convert to grayscale, expand to 3 channels
+
     # Populated by the processor (video_features, state_features, text_features)
     input_features: dict = field(default_factory=lambda: {})
 

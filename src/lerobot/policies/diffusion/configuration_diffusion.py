@@ -100,8 +100,8 @@ class DiffusionConfig(PreTrainedConfig):
 
     # Inputs / output structure.
     n_obs_steps: int = 2
-    horizon: int = 16
-    n_action_steps: int = 8
+    horizon: int = 32
+    n_action_steps: int = 16
 
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
@@ -111,9 +111,35 @@ class DiffusionConfig(PreTrainedConfig):
         }
     )
 
-    # The original implementation doesn't sample frames for the last 7 steps,
-    # which avoids excessive padding and leads to improved training results.
-    drop_n_last_frames: int = 7  # horizon - n_action_steps - n_obs_steps + 1
+    # Auto-computed as horizon - n_action_steps - n_obs_steps + 1 if None.
+    drop_n_last_frames: int | None = None
+
+    # Relative actions: predict joint deltas (action - state) instead of absolute positions.
+    use_relative_actions: bool = False
+    relative_exclude_joints: list[str] = field(default_factory=lambda: ["gripper"])
+    action_feature_names: list[str] | None = None
+
+    # Proprio dropout: zero the full state vector with this probability during training only.
+    # Forces the policy to fall back on vision when state is unavailable.
+    proprio_dropout: float = 0.0
+
+    # State index selection: which dimensions of observation.state to feed to the model.
+    # None = all dims (A1, A3). [5] = gripper only (A2). [] = no state / vision-only (A4).
+    # The model is built with global_cond_dim matching len(state_indices).
+    state_indices: list[int] | None = None
+
+    # Override ACTION normalization mode. "MEAN_STD" is better for relative/delta actions
+    # (zero-centered, tight std). "MIN_MAX" is the default. Applied in __post_init__.
+    action_normalization_mode: str = "MIN_MAX"
+
+    # ── A5: EEF delta actions ──────────────────────────────────────────────────
+    # When enabled, EEFActionProcessorStep replaces joint actions with 10-D EEF
+    # delta actions [pos_delta(3), rot_6d_delta(6), gripper(1)], and ACTION
+    # normalization is bypassed (handled internally by the processor).
+    use_eef_actions: bool = False
+    eef_poses_path: str | None = None   # path to eef_poses.npy (N_total, 12)
+    eef_stats_path: str | None = None   # path to eef_stats.json
+    eef_action_dim: int = 10            # 3 pos + 6 rot6d + 1 gripper
 
     # Architecture / modeling.
     # Vision backbone.
@@ -163,6 +189,16 @@ class DiffusionConfig(PreTrainedConfig):
     def __post_init__(self):
         super().__post_init__()
 
+        if self.drop_n_last_frames is None:
+            self.drop_n_last_frames = self.horizon - self.n_action_steps - self.n_obs_steps + 1
+
+        if self.action_normalization_mode != "MIN_MAX":
+            self.normalization_mapping["ACTION"] = NormalizationMode(self.action_normalization_mode)
+
+        if self.use_eef_actions:
+            # EEFActionProcessorStep handles all action normalization internally.
+            self.normalization_mapping["ACTION"] = NormalizationMode.IDENTITY
+
         """Input validation (not exhaustive)."""
         if not self.vision_backbone.startswith("resnet"):
             raise ValueError(
@@ -208,6 +244,12 @@ class DiffusionConfig(PreTrainedConfig):
                 "The horizon should be an integer multiple of the downsampling factor (which is determined "
                 f"by `len(down_dims)`). Got {self.horizon=} and {self.down_dims=}"
             )
+
+    def get_action_dim(self) -> int:
+        """Action dimension used by the UNet: eef_action_dim for A5, otherwise from features."""
+        if self.use_eef_actions:
+            return self.eef_action_dim
+        return self.action_feature.shape[0]
 
     def get_optimizer_preset(self) -> AdamConfig:
         return AdamConfig(

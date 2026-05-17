@@ -191,7 +191,11 @@ class DiffusionModel(nn.Module):
         self.config = config
 
         # Build observation encoders (depending on which observations are provided).
-        global_cond_dim = self.config.robot_state_feature.shape[0]
+        # state_indices=None → all state dims; [] → no state (A4); [5] → gripper only (A2).
+        if config.state_indices is None:
+            global_cond_dim = self.config.robot_state_feature.shape[0]
+        else:
+            global_cond_dim = len(config.state_indices)
         if self.config.image_features:
             num_images = len(self.config.image_features)
             if self.config.use_separate_rgb_encoder_per_camera:
@@ -243,7 +247,7 @@ class DiffusionModel(nn.Module):
             noise
             if noise is not None
             else torch.randn(
-                size=(batch_size, self.config.horizon, self.config.action_feature.shape[0]),
+                size=(batch_size, self.config.horizon, self.config.get_action_dim()),
                 dtype=dtype,
                 device=device,
                 generator=generator,
@@ -267,7 +271,15 @@ class DiffusionModel(nn.Module):
     def _prepare_global_conditioning(self, batch: dict[str, Tensor]) -> Tensor:
         """Encode image features and concatenate them all together along with the state vector."""
         batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
-        global_cond_feats = [batch[OBS_STATE]]
+        state = batch[OBS_STATE]
+        # Proprio dropout: during training, zero the full state vector with probability proprio_dropout.
+        if self.training and self.config.proprio_dropout > 0.0:
+            keep = torch.rand(batch_size, 1, 1, device=state.device) > self.config.proprio_dropout
+            state = state * keep.to(state.dtype)
+        # State index selection: slice to the configured dims before conditioning.
+        if self.config.state_indices is not None:
+            state = state[..., self.config.state_indices]
+        global_cond_feats = [] if state.shape[-1] == 0 else [state]
         # Extract image features.
         if self.config.image_features:
             if self.config.use_separate_rgb_encoder_per_camera:
@@ -646,7 +658,7 @@ class DiffusionConditionalUnet1d(nn.Module):
 
         # In channels / out channels for each downsampling block in the Unet's encoder. For the decoder, we
         # just reverse these.
-        in_out = [(config.action_feature.shape[0], config.down_dims[0])] + list(
+        in_out = [(config.get_action_dim(), config.down_dims[0])] + list(
             zip(config.down_dims[:-1], config.down_dims[1:], strict=True)
         )
 
@@ -701,7 +713,7 @@ class DiffusionConditionalUnet1d(nn.Module):
 
         self.final_conv = nn.Sequential(
             DiffusionConv1dBlock(config.down_dims[0], config.down_dims[0], kernel_size=config.kernel_size),
-            nn.Conv1d(config.down_dims[0], config.action_feature.shape[0], 1),
+            nn.Conv1d(config.down_dims[0], config.get_action_dim(), 1),
         )
 
     def forward(self, x: Tensor, timestep: Tensor | int, global_cond=None) -> Tensor:

@@ -29,6 +29,14 @@ from lerobot.processor import (
     policy_action_to_transition,
     transition_to_policy_action,
 )
+from lerobot.processor.eef_action_processor import (
+    EEFActionProcessorStep,
+    EEFUnnormalizeProcessorStep,
+)
+from lerobot.processor.relative_action_processor import (
+    AbsoluteActionsProcessorStep,
+    RelativeActionsProcessorStep,
+)
 from lerobot.utils.constants import POLICY_POSTPROCESSOR_DEFAULT_NAME, POLICY_PREPROCESSOR_DEFAULT_NAME
 
 from .configuration_diffusion import DiffusionConfig
@@ -44,30 +52,44 @@ def make_diffusion_pre_post_processors(
     """
     Constructs pre-processor and post-processor pipelines for a diffusion policy.
 
-    The pre-processing pipeline prepares the input data for the model by:
-    1. Renaming features.
-    2. Normalizing the input and output features based on dataset statistics.
-    3. Adding a batch dimension.
-    4. Moving the data to the specified device.
+    Pre-processing order:
+    1. Rename features.
+    2. Add batch dimension.
+    3. Move to device.
+    4. (Optional) Convert absolute actions → relative deltas.
+    5. Normalize using dataset statistics.
 
-    The post-processing pipeline handles the model's output by:
-    1. Moving the data to the CPU.
-    2. Unnormalizing the output features to their original scale.
-
-    Args:
-        config: The configuration object for the diffusion policy,
-            containing feature definitions, normalization mappings, and device information.
-        dataset_stats: A dictionary of statistics used for normalization.
-            Defaults to None.
-
-    Returns:
-        A tuple containing the configured pre-processor and post-processor pipelines.
+    Post-processing order:
+    1. Unnormalize predictions.
+    2. (Optional) Convert relative deltas → absolute actions by adding cached state.
+    3. Move to CPU.
     """
+    if config.use_eef_actions:
+        if not config.eef_poses_path or not config.eef_stats_path:
+            raise ValueError(
+                "use_eef_actions=True requires eef_poses_path and eef_stats_path to be set."
+            )
+        action_step = EEFActionProcessorStep(
+            eef_poses_path=config.eef_poses_path,
+            eef_stats_path=config.eef_stats_path,
+            horizon=config.horizon,
+        )
+        post_action_step = EEFUnnormalizeProcessorStep(eef_stats_path=config.eef_stats_path)
+    else:
+        action_step = RelativeActionsProcessorStep(
+            enabled=config.use_relative_actions,
+            exclude_joints=getattr(config, "relative_exclude_joints", []),
+            action_names=getattr(config, "action_feature_names", None),
+        )
+        post_action_step = AbsoluteActionsProcessorStep(
+            enabled=config.use_relative_actions, relative_step=action_step
+        )
 
     input_steps = [
         RenameObservationsProcessorStep(rename_map={}),
         AddBatchDimensionProcessorStep(),
         DeviceProcessorStep(device=config.device),
+        action_step,
         NormalizerProcessorStep(
             features={**config.input_features, **config.output_features},
             norm_map=config.normalization_mapping,
@@ -78,6 +100,7 @@ def make_diffusion_pre_post_processors(
         UnnormalizerProcessorStep(
             features=config.output_features, norm_map=config.normalization_mapping, stats=dataset_stats
         ),
+        post_action_step,
         DeviceProcessorStep(device="cpu"),
     ]
     return (
