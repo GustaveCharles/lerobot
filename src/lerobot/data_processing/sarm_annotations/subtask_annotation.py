@@ -458,7 +458,7 @@ class VideoAnnotator:
 
                     with torch.no_grad():
                         generated_ids = self.model.generate(
-                            **inputs, max_new_tokens=1024, do_sample=True, temperature=0.7
+                            **inputs, max_new_tokens=4096, do_sample=True, temperature=0.7
                         )
 
                     response = self.processor.batch_decode(
