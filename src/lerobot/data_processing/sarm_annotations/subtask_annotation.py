@@ -408,13 +408,18 @@ class VideoAnnotator:
         extracted_path = self.extract_episode_segment(file_path, start_timestamp, end_timestamp, 1)
         is_extracted = extracted_path != file_path
 
+        # Count actual frames in extracted video so nframes matches exactly
+        _cap = cv2.VideoCapture(str(extracted_path))
+        _nframes = max(1, int(_cap.get(cv2.CAP_PROP_FRAME_COUNT)))
+        _cap.release()
+
         try:
             messages = [
                 {"role": "system", "content": [{"type": "text", "text": self.prompt}]},
                 {
                     "role": "user",
                     "content": [
-                        {"type": "video", "video": str(extracted_path), "fps": 1.0},
+                        {"type": "video", "video": str(extracted_path), "nframes": _nframes},
                         {
                             "type": "text",
                             "text": f"Video is {duration_str} (~{duration:.1f}s). Follow instructions.",
