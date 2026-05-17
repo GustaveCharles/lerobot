@@ -22,6 +22,8 @@ from typing import Any
 import numpy as np
 import torch
 
+from lerobot.configs import PipelineFeatureType, PolicyFeature
+from lerobot.configs.types import FeatureType
 from lerobot.processor.pipeline import ProcessorStep
 from lerobot.types import EnvTransition, TransitionKey
 from lerobot.utils.constants import ACTION
@@ -147,6 +149,16 @@ class EEFActionProcessorStep(ProcessorStep):
         new_transition[TransitionKey.ACTION] = eef_action
         return new_transition
 
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        # Replace ACTION feature with 10-D EEF action
+        if PipelineFeatureType.ACTION in features:
+            features[PipelineFeatureType.ACTION] = {
+                ACTION: PolicyFeature(shape=(self.horizon, 10), type=FeatureType.ACTION)
+            }
+        return features
+
     def get_config(self) -> dict[str, Any]:
         return {"type": "EEFActionProcessorStep", "horizon": self.horizon}
 
@@ -198,6 +210,11 @@ class EEFUnnormalizeProcessorStep(ProcessorStep):
         new_transition = transition.copy()
         new_transition[TransitionKey.ACTION] = torch.cat([pos, rot_6d, gripper], dim=-1)
         return new_transition
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features  # output shape matches input shape
 
     def get_config(self) -> dict[str, Any]:
         return {"type": "EEFUnnormalizeProcessorStep"}
