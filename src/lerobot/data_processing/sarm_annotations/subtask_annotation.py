@@ -74,7 +74,7 @@ import numpy as np
 import pandas as pd
 import torch
 from pydantic import BaseModel, Field
-from transformers import AutoProcessor, Qwen3VLMoeForConditionalGeneration
+from transformers import AutoConfig, AutoProcessor, Qwen3VLMoeForConditionalGeneration
 
 from lerobot.datasets import LeRobotDataset
 
@@ -281,11 +281,20 @@ class VideoAnnotator:
             self.processor = processor
             print(f"Using shared model on {device}")
         else:
-            from transformers import AutoProcessor, Qwen3VLMoeForConditionalGeneration
-
             print(f"Loading model: {model_name}...")
 
-            self.model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
+            _cfg = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+            if getattr(_cfg, "num_experts", None):
+                ModelClass = Qwen3VLMoeForConditionalGeneration
+            else:
+                try:
+                    from transformers import Qwen3VLForConditionalGeneration
+                    ModelClass = Qwen3VLForConditionalGeneration
+                except ImportError:
+                    from transformers import AutoModelForCausalLM
+                    ModelClass = AutoModelForCausalLM
+
+            self.model = ModelClass.from_pretrained(
                 model_name, torch_dtype=torch_dtype, device_map=device, trust_remote_code=True
             )
 
