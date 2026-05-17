@@ -59,6 +59,7 @@ python examples/dataset_annotation/subtask_annotation.py \
 import argparse
 import json
 import multiprocessing as mp
+import traceback as _traceback
 import random
 import re
 import subprocess
@@ -468,6 +469,8 @@ class VideoAnnotator:
                             return SubtaskAnnotation.model_validate(json.loads(match.group()))
                         raise ValueError("No JSON found") from None
                 except Exception as e:
+                    print(f"  Attempt {attempt+1} failed: {e}")
+                    _traceback.print_exc()
                     if attempt == max_retries - 1:
                         raise RuntimeError(f"Failed after {max_retries} attempts") from e
                     time.sleep(1)
