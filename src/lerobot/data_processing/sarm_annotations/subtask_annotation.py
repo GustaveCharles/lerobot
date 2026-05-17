@@ -408,21 +408,30 @@ class VideoAnnotator:
         extracted_path = self.extract_episode_segment(file_path, start_timestamp, end_timestamp, 1)
         is_extracted = extracted_path != file_path
 
-        # Count actual frames in extracted video so nframes matches exactly
+        # Extract frames as PIL images to avoid qwen_vl_utils video metadata issues
+        import PIL.Image
         _cap = cv2.VideoCapture(str(extracted_path))
-        _nframes = max(1, int(_cap.get(cv2.CAP_PROP_FRAME_COUNT)))
+        _frames = []
+        while True:
+            _ret, _frame = _cap.read()
+            if not _ret:
+                break
+            _frames.append(PIL.Image.fromarray(cv2.cvtColor(_frame, cv2.COLOR_BGR2RGB)))
         _cap.release()
+        if not _frames:
+            raise RuntimeError(f"No frames extracted from {extracted_path}")
 
         try:
+            # Pass frames as individual images — more reliable than video file path
+            _frame_content = [{"type": "image", "image": f} for f in _frames]
             messages = [
                 {"role": "system", "content": [{"type": "text", "text": self.prompt}]},
                 {
                     "role": "user",
-                    "content": [
-                        {"type": "video", "video": str(extracted_path), "nframes": _nframes},
+                    "content": _frame_content + [
                         {
                             "type": "text",
-                            "text": f"Video is {duration_str} (~{duration:.1f}s). Follow instructions.",
+                            "text": f"The {len(_frames)} images above are sequential 1-second frames from a robot manipulation video ({duration_str}, ~{duration:.1f}s total). Follow instructions.",
                         },
                     ],
                 },
