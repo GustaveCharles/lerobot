@@ -506,6 +506,14 @@ class DiffusionRgbEncoder(nn.Module):
         else:
             self.do_crop = False
 
+        # Grayworld / grayscale preprocessing.
+        self.do_grayworld = config.image_grayworld
+        if config.image_grayscale:
+            self.do_grayscale = True
+            self.grayscale = torchvision.transforms.Grayscale(num_output_channels=3)
+        else:
+            self.do_grayscale = False
+
         # Set up backbone.
         backbone_model = getattr(torchvision.models, config.vision_backbone)(
             weights=config.pretrained_backbone_weights
@@ -561,6 +569,11 @@ class DiffusionRgbEncoder(nn.Module):
             else:
                 # Always use center crop for eval.
                 x = self.center_crop(x)
+        if self.do_grayworld:
+            means = x.mean(dim=(-2, -1), keepdim=True)
+            x = (x * (means.mean(dim=-3, keepdim=True) / (means + 1e-6))).clamp(0, 1)
+        if self.do_grayscale:
+            x = self.grayscale(x)
         # Extract backbone feature.
         x = torch.flatten(self.pool(self.backbone(x)), start_dim=1)
         # Final linear layer with non-linearity.

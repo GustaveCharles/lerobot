@@ -152,6 +152,8 @@ class DiffusionConfig(PreTrainedConfig):
     use_group_norm: bool = True
     spatial_softmax_num_keypoints: int = 32
     use_separate_rgb_encoder_per_camera: bool = False
+    image_grayworld: bool = False  # Gray-world white-balance normalisation (train AND inference)
+    image_grayscale: bool = False  # Convert to grayscale 3-ch output (train AND inference, after grayworld)
     # Unet.
     down_dims: tuple[int, ...] = (512, 1024, 2048)
     kernel_size: int = 5

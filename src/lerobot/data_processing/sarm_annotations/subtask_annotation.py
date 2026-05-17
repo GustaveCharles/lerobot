@@ -1190,6 +1190,13 @@ def main():
                     if dense_ann:
                         dense_annotations[ep_idx] = dense_ann
                         save_annotations_to_dataset(dataset.root, dense_annotations, fps, prefix="dense")
+                        # Save proportions incrementally so progress is visible mid-run
+                        _props = compute_temporal_proportions(dense_annotations, fps, dense_subtask_list)
+                        _path = dataset.root / "meta" / "temporal_proportions_dense.json"
+                        _path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(_path, "w") as _f:
+                            json.dump(_props, _f, indent=2)
+                        print(f"  Annotated {len(dense_annotations)}/{len(episode_indices)} episodes")
                     elif err:
                         print(f"Dense failed: {err}")
 
