@@ -117,6 +117,7 @@ class EEFActionProcessorStep(ProcessorStep):
         # Gather all chunk frames: (B, T) global indices
         offsets = torch.arange(T, device=device, dtype=global_indices.dtype)
         chunk_idx = global_indices.unsqueeze(1) + offsets.unsqueeze(0)  # (B, T)
+        chunk_idx = chunk_idx.clamp(0, self._eef_poses.shape[0] - 1)
 
         # Look up poses: (B, T, 12)
         poses = self._eef_poses[chunk_idx]
