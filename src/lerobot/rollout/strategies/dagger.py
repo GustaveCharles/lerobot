@@ -24,9 +24,11 @@ the ``input_device`` config field.  Each device exposes three actions:
     1. **pause_resume** — Toggle policy execution (AUTONOMOUS <-> PAUSED).
     2. **correction**   — Toggle correction recording (PAUSED <-> CORRECTING).
     3. **upload**        — Push dataset to hub on demand (corrections-only mode).
-    4. **discard**       — (keyboard, corrections-only mode) Drop the
-        in-progress correction without saving and return to PAUSED.
-        No effect outside CORRECTING.
+    4. **discard**       — (keyboard) Drop the in-progress episode buffer.
+        Corrections-only mode: only valid in CORRECTING; returns arms to
+        the session's initial pose and re-enters CORRECTING.
+        Continuous mode: clears the current episode buffer (autonomous or
+        correction frames) and resets the rotation timer.
     ESC (keyboard only) — Stop session.
 
 Recording modes:
@@ -269,7 +271,7 @@ def _init_dagger_keyboard(events: DAggerEvents, cfg: DAggerKeyboardConfig):
             if key == pynput_key:
                 return name
         if hasattr(key, "char") and key.char:
-            return key.char
+            return key.char.lower()
         return None
 
     # Build mapping: resolved key string -> DAgger event name
@@ -480,6 +482,20 @@ class DAggerStrategy(RolloutStrategy):
                         old_phase, new_phase = transition
                         self._apply_transition(old_phase, new_phase, engine, interpolator, robot, teleop)
                         last_action = None
+
+                    # On-demand discard of the in-progress episode (autonomous
+                    # or correction frames). Drops the episode buffer and
+                    # resets the rotation timer so the next saved episode
+                    # starts fresh.
+                    if events.discard_requested.is_set():
+                        events.discard_requested.clear()
+                        logger.info("Discarding in-progress episode buffer")
+                        log_say("Discarding episode", play_sounds)
+                        with self._episode_lock:
+                            dataset.clear_episode_buffer()
+                        last_action = None
+                        record_tick = 0
+                        episode_start = time.perf_counter()
 
                     phase = events.phase
                     obs = robot.get_observation()
