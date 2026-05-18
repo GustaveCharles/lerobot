@@ -533,7 +533,7 @@ class DAggerStrategy(RolloutStrategy):
                         interpolator.reset()
                         engine.reset()
                         _try_teleop_disable_torque(teleop)
-                        engine.resume()
+                        engine.pause()
 
                         if (
                             save_pressed
@@ -542,10 +542,15 @@ class DAggerStrategy(RolloutStrategy):
                             self._background_push(dataset, cfg)
                             episodes_since_push = 0
 
-                        events.phase = DAggerPhase.AUTONOMOUS
+                        events.phase = DAggerPhase.PAUSED
                         last_action = None
                         record_tick = 0
                         episode_start = time.perf_counter()
+                        logger.info(
+                            "Paused after %s — press '%s' to start next episode",
+                            "save" if save_pressed else "discard",
+                            self.config.keyboard.pause_resume,
+                        )
 
                     phase = events.phase
                     obs = robot.get_observation()
