@@ -24,11 +24,13 @@ the ``input_device`` config field.  Each device exposes three actions:
     1. **pause_resume** — Toggle policy execution (AUTONOMOUS <-> PAUSED).
     2. **correction**   — Toggle correction recording (PAUSED <-> CORRECTING).
     3. **upload**        — Push dataset to hub on demand (corrections-only mode).
-    4. **discard**       — (keyboard) Drop the in-progress episode buffer.
-        Corrections-only mode: only valid in CORRECTING; returns arms to
-        the session's initial pose and re-enters CORRECTING.
-        Continuous mode: clears the current episode buffer (autonomous or
-        correction frames) and resets the rotation timer.
+    4. **discard**       — (keyboard) End-of-rollout / discard.
+        Corrections-only mode: only valid in CORRECTING; drops the
+        in-progress correction, returns arms to the session's initial
+        pose, and re-enters CORRECTING.
+        Continuous mode: saves the in-progress episode, returns arms to
+        the session's initial pose, resets the policy engine, and starts
+        a fresh autonomous episode (clean per-rollout episode boundaries).
     ESC (keyboard only) — Stop session.
 
 Recording modes:
@@ -483,16 +485,41 @@ class DAggerStrategy(RolloutStrategy):
                         self._apply_transition(old_phase, new_phase, engine, interpolator, robot, teleop)
                         last_action = None
 
-                    # On-demand discard of the in-progress episode (autonomous
-                    # or correction frames). Drops the episode buffer and
-                    # resets the rotation timer so the next saved episode
-                    # starts fresh.
+                    # End-of-rollout: save the current episode, return the
+                    # arms to the session's initial pose, reset the policy
+                    # engine, and start a fresh autonomous episode. Used to
+                    # produce clean one-episode-per-rollout separation in
+                    # continuous mode.
                     if events.discard_requested.is_set():
                         events.discard_requested.clear()
-                        logger.info("Discarding in-progress episode buffer")
-                        log_say("Discarding episode", play_sounds)
+                        logger.info("Restarting rollout: saving episode, returning to initial pose")
+                        log_say("Restarting rollout", play_sounds)
+
+                        engine.pause()
                         with self._episode_lock:
-                            dataset.clear_episode_buffer()
+                            with contextlib.suppress(Exception):
+                                dataset.save_episode()
+                                self._needs_push.set()
+                                episodes_since_push += 1
+                                logger.info(
+                                    "Episode saved (total: %d)", dataset.num_episodes
+                                )
+
+                        if ctx.hardware.initial_position:
+                            self._return_to_initial_position(
+                                ctx.hardware, duration_s=3.0, fps=50
+                            )
+
+                        interpolator.reset()
+                        engine.reset()
+                        _try_teleop_disable_torque(teleop)
+                        engine.resume()
+
+                        if episodes_since_push >= self.config.upload_every_n_episodes:
+                            self._background_push(dataset, cfg)
+                            episodes_since_push = 0
+
+                        events.phase = DAggerPhase.AUTONOMOUS
                         last_action = None
                         record_tick = 0
                         episode_start = time.perf_counter()
