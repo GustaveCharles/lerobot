@@ -145,6 +145,19 @@ class SOLeader(Teleoperator):
         logger.debug(f"{self} read action: {dt_ms:.1f}ms")
         return action
 
+    @check_if_not_connected
+    def enable_torque(self) -> None:
+        self.bus.enable_torque()
+
+    @check_if_not_connected
+    def disable_torque(self) -> None:
+        self.bus.disable_torque()
+
+    @check_if_not_connected
+    def write_goal_positions(self, goal: dict[str, float]) -> None:
+        goal_pos = {k.removesuffix(".pos"): v for k, v in goal.items() if k.endswith(".pos")}
+        self.bus.sync_write("Goal_Position", goal_pos)
+
     def send_feedback(self, feedback: dict[str, float]) -> None:
         # TODO: Implement force feedback
         raise NotImplementedError
