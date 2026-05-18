@@ -106,6 +106,7 @@ class DAggerKeyboardConfig:
     pause_resume: str = "space"
     correction: str = "tab"
     upload: str = "enter"
+    save: str = "s"
     discard: str = "d"
 
 

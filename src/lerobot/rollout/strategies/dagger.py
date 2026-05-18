@@ -24,13 +24,17 @@ the ``input_device`` config field.  Each device exposes three actions:
     1. **pause_resume** — Toggle policy execution (AUTONOMOUS <-> PAUSED).
     2. **correction**   — Toggle correction recording (PAUSED <-> CORRECTING).
     3. **upload**        — Push dataset to hub on demand (corrections-only mode).
-    4. **discard**       — (keyboard) End-of-rollout / discard.
+    4. **save**          — (keyboard, continuous mode) End the current
+        rollout cleanly: save the in-progress episode, return arms to the
+        session's initial pose, reset the policy engine, and start a
+        fresh autonomous episode.
+    5. **discard**       — (keyboard) Discard the in-progress episode.
         Corrections-only mode: only valid in CORRECTING; drops the
-        in-progress correction, returns arms to the session's initial
-        pose, and re-enters CORRECTING.
-        Continuous mode: saves the in-progress episode, returns arms to
-        the session's initial pose, resets the policy engine, and starts
-        a fresh autonomous episode (clean per-rollout episode boundaries).
+        correction, returns arms to the session's initial pose, and
+        re-enters CORRECTING.
+        Continuous mode: drops the in-progress episode buffer, returns
+        arms to the session's initial pose, resets the policy engine, and
+        starts a fresh autonomous episode (for uncorrectable failures).
     ESC (keyboard only) — Stop session.
 
 Recording modes:
@@ -133,6 +137,7 @@ class DAggerEvents:
         # Session-level flags
         self.stop_recording = Event()
         self.upload_requested = Event()
+        self.save_requested = Event()
         self.discard_requested = Event()
 
     # -- Thread-safe phase access ------------------------------------------
@@ -178,6 +183,7 @@ class DAggerEvents:
             self._phase = DAggerPhase.AUTONOMOUS
             self._pending_transition = None
         self.upload_requested.clear()
+        self.save_requested.clear()
         self.discard_requested.clear()
 
 
@@ -295,6 +301,8 @@ def _init_dagger_keyboard(events: DAggerEvents, cfg: DAggerKeyboardConfig):
                 events.request_transition(key_to_event[resolved])
             if resolved == cfg.upload:
                 events.upload_requested.set()
+            if resolved == cfg.save:
+                events.save_requested.set()
             if resolved == cfg.discard:
                 events.discard_requested.set()
         except Exception as e:
@@ -303,10 +311,11 @@ def _init_dagger_keyboard(events: DAggerEvents, cfg: DAggerKeyboardConfig):
     listener = keyboard.Listener(on_press=on_press)
     listener.start()
     logger.info(
-        "DAgger keyboard listener started (pause_resume='%s', correction='%s', upload='%s', discard='%s', ESC=stop)",
+        "DAgger keyboard listener started (pause_resume='%s', correction='%s', upload='%s', save='%s', discard='%s', ESC=stop)",
         cfg.pause_resume,
         cfg.correction,
         cfg.upload,
+        cfg.save,
         cfg.discard,
     )
     return listener
@@ -485,25 +494,36 @@ class DAggerStrategy(RolloutStrategy):
                         self._apply_transition(old_phase, new_phase, engine, interpolator, robot, teleop)
                         last_action = None
 
-                    # End-of-rollout: save the current episode, return the
-                    # arms to the session's initial pose, reset the policy
-                    # engine, and start a fresh autonomous episode. Used to
-                    # produce clean one-episode-per-rollout separation in
-                    # continuous mode.
-                    if events.discard_requested.is_set():
+                    # End-of-rollout controls. Both keys return the arms to
+                    # the session's initial pose, reset the policy engine,
+                    # and start a fresh autonomous episode. They differ in
+                    # what they do with the in-progress episode buffer:
+                    #   save    -> save the episode (good rollout)
+                    #   discard -> drop the episode (uncorrectable failure)
+                    save_pressed = events.save_requested.is_set()
+                    discard_pressed = events.discard_requested.is_set()
+                    if save_pressed or discard_pressed:
+                        events.save_requested.clear()
                         events.discard_requested.clear()
-                        logger.info("Restarting rollout: saving episode, returning to initial pose")
-                        log_say("Restarting rollout", play_sounds)
 
                         engine.pause()
-                        with self._episode_lock:
-                            with contextlib.suppress(Exception):
-                                dataset.save_episode()
-                                self._needs_push.set()
-                                episodes_since_push += 1
-                                logger.info(
-                                    "Episode saved (total: %d)", dataset.num_episodes
-                                )
+
+                        if save_pressed:
+                            logger.info("Saving rollout: returning to initial pose")
+                            log_say("Saving rollout", play_sounds)
+                            with self._episode_lock:
+                                with contextlib.suppress(Exception):
+                                    dataset.save_episode()
+                                    self._needs_push.set()
+                                    episodes_since_push += 1
+                                    logger.info(
+                                        "Episode saved (total: %d)", dataset.num_episodes
+                                    )
+                        else:
+                            logger.info("Discarding rollout: returning to initial pose")
+                            log_say("Discarding rollout", play_sounds)
+                            with self._episode_lock:
+                                dataset.clear_episode_buffer()
 
                         if ctx.hardware.initial_position:
                             self._return_to_initial_position(
@@ -515,7 +535,10 @@ class DAggerStrategy(RolloutStrategy):
                         _try_teleop_disable_torque(teleop)
                         engine.resume()
 
-                        if episodes_since_push >= self.config.upload_every_n_episodes:
+                        if (
+                            save_pressed
+                            and episodes_since_push >= self.config.upload_every_n_episodes
+                        ):
                             self._background_push(dataset, cfg)
                             episodes_since_push = 0
 
