@@ -60,12 +60,24 @@ class BaseStrategy(RolloutStrategy):
                 break
 
             obs = robot.get_observation()
+            theta = getattr(cfg.strategy, "joint_offset", 0.0)
+            offset_motors = getattr(cfg.strategy, "offset_motors", ["shoulder_pan", "gripper"])
+            if theta:
+                for motor in offset_motors:
+                    key = f"{motor}.pos"
+                    if key in obs:
+                        obs[key] = obs[key] - theta
             obs_processed = self._process_observation_and_notify(ctx.processors, obs)
 
             if self._handle_warmup(cfg.use_torch_compile, loop_start, control_interval):
                 continue
 
             action_dict = send_next_action(obs_processed, obs, ctx, interpolator)
+            if theta:
+                for motor in offset_motors:
+                    key = f"{motor}.pos"
+                    if key in action_dict:
+                        action_dict[key] = action_dict[key] + theta
             self._log_telemetry(obs_processed, action_dict, ctx.runtime)
 
             dt = time.perf_counter() - loop_start

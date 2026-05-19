@@ -53,9 +53,19 @@ class RolloutStrategyConfig(draccus.ChoiceRegistry, abc.ABC):
 @RolloutStrategyConfig.register_subclass("base")
 @dataclass
 class BaseStrategyConfig(RolloutStrategyConfig):
-    """Autonomous rollout with no data recording."""
+    """Autonomous rollout with no data recording.
 
-    pass
+    joint_offset: degrees subtracted from obs and added back to actions for
+      every motor listed in offset_motors.  Use this to generalise to a
+      rotated towel without retraining — set joint_offset to the towel's
+      rotation angle relative to the training setup.
+
+    offset_motors: motor names (without '.pos') to apply joint_offset to.
+      Default [shoulder_pan, gripper] covers motor-0 and motor-5.
+    """
+
+    joint_offset: float = 0.0
+    offset_motors: list[str] = field(default_factory=lambda: ["shoulder_pan", "wrist_roll"])
 
 
 @RolloutStrategyConfig.register_subclass("sentry")
