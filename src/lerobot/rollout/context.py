@@ -395,15 +395,6 @@ def build_rollout_context(
         },
     )
 
-    if isinstance(cfg.inference, SyncInferenceConfig) and any(
-        isinstance(step, RelativeActionsProcessorStep) and step.enabled
-        for step in getattr(preprocessor, "steps", ())
-    ):
-        raise NotImplementedError(
-            "SyncInferenceEngine does not support policies with relative actions for now."
-            "Use --inference.type=rtc or remove relative action processor steps from the policy pipeline."
-        )
-
     # --- 7. Inference strategy (needs policy + pre/post + hardware) --
     logger.info(
         "Creating inference engine (type=%s)...",
