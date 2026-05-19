@@ -64,8 +64,12 @@ class BaseStrategyConfig(RolloutStrategyConfig):
       Default [shoulder_pan, gripper] covers motor-0 and motor-5.
     """
 
-    joint_offset: float = 0.0
+    # Motors whose initial observed values are captured as per-motor offsets
+    # at episode start. Each motor gets its own independent offset value
+    # (auto-detected from the first observation). joint_offset is an optional
+    # uniform additive correction applied on top of all captured offsets.
     offset_motors: list[str] = field(default_factory=lambda: ["shoulder_pan", "wrist_roll"])
+    joint_offset: float = 0.0
 
 
 @RolloutStrategyConfig.register_subclass("sentry")
