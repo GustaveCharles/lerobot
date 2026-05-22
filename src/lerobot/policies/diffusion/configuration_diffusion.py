@@ -132,6 +132,26 @@ class DiffusionConfig(PreTrainedConfig):
     # (zero-centered, tight std). "MIN_MAX" is the default. Applied in __post_init__.
     action_normalization_mode: str = "MIN_MAX"
 
+    # ── Subtask classifier conditioning ────────────────────────────────────────
+    # Frozen DINOv2-S subtask classifier (trained by scripts/train_subtask_classifier.py).
+    # When enabled, runs the classifier on the input image and appends its N-class
+    # softmax probabilities to `global_cond`.
+    #   - image: resize 224 + grayworld + ImageNet-norm (matches classifier training).
+    #   - state: denormalized from the policy's MIN_MAX [-1, 1] using dataset min/max
+    #            (loaded from `subtask_dataset_state_stats_path`), then renormalized with
+    #            the classifier's own state_mean / state_std (stored in the checkpoint).
+    #   - prev_subtask: ground-truth at training (looked up from `subtask_prev_array_path`
+    #            via `batch["index"]`; episode-boundary handling is baked into the array),
+    #            rolling argmax at rollout.
+    use_subtask_classifier: bool = False
+    subtask_classifier_repo: str | None = None       # e.g. "gaspardthrl/walleed-subtask-cls"
+    subtask_classifier_filename: str = "dino/best.pt"
+    subtask_classifier_path: str | None = None       # local checkpoint override (skips HF download)
+    subtask_classifier_n_classes: int = 8
+    subtask_classifier_image_key: str | None = None  # camera key to feed; default = first image_feature
+    subtask_prev_array_path: str | None = None       # int8 array, length = total frames
+    subtask_dataset_state_stats_path: str | None = None  # dataset stats JSON (same as stats_override_path)
+
     # ── A5: EEF delta actions ──────────────────────────────────────────────────
     # When enabled, EEFActionProcessorStep replaces joint actions with 10-D EEF
     # delta actions [pos_delta(3), rot_6d_delta(6), gripper(1)], and ACTION

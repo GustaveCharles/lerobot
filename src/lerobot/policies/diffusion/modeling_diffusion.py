@@ -50,6 +50,7 @@ from ..utils import (
     populate_queues,
 )
 from .configuration_diffusion import DiffusionConfig
+from .subtask_classifier import IMAGENET_MEAN, IMAGENET_STD, load_subtask_classifier
 
 
 class DiffusionPolicy(PreTrainedPolicy):
@@ -98,6 +99,8 @@ class DiffusionPolicy(PreTrainedPolicy):
             self._queues[OBS_IMAGES] = deque(maxlen=self.config.n_obs_steps)
         if self.config.env_state_feature:
             self._queues[OBS_ENV_STATE] = deque(maxlen=self.config.n_obs_steps)
+        # Reset rolling prev_subtask buffer used by the subtask classifier at inference.
+        self.diffusion.reset_subtask_state()
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None, populate_queues_first: bool = True) -> Tensor:
@@ -208,6 +211,12 @@ class DiffusionModel(nn.Module):
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
 
+        # Subtask classifier conditioning: appends N-class softmax probs to global_cond.
+        self.subtask_classifier = None
+        if config.use_subtask_classifier:
+            self._init_subtask_classifier()
+            global_cond_dim += config.subtask_classifier_n_classes
+
         self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
 
         if config.compile_model:
@@ -268,6 +277,143 @@ class DiffusionModel(nn.Module):
 
         return sample
 
+    # ── Subtask classifier helpers ────────────────────────────────────────────
+    def _init_subtask_classifier(self) -> None:
+        """Load the frozen classifier and register all stats / lookup buffers."""
+        config = self.config
+        self.subtask_classifier, sub_meta = load_subtask_classifier(
+            path=config.subtask_classifier_path,
+            repo_id=config.subtask_classifier_repo,
+            filename=config.subtask_classifier_filename,
+        )
+        self.register_buffer(
+            "_subtask_img_mean",
+            torch.tensor(IMAGENET_MEAN, dtype=torch.float32).view(1, 3, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_subtask_img_std",
+            torch.tensor(IMAGENET_STD, dtype=torch.float32).view(1, 3, 1, 1),
+            persistent=False,
+        )
+        # Classifier's own state mean/std (from the checkpoint).
+        cls_mean = sub_meta.get("state_mean")
+        cls_std = sub_meta.get("state_std")
+        if cls_mean is None or cls_std is None:
+            raise ValueError(
+                "subtask classifier checkpoint is missing state_mean/state_std; "
+                "cannot renormalize state for the classifier."
+            )
+        self.register_buffer(
+            "_subtask_cls_state_mean",
+            torch.tensor(np.asarray(cls_mean), dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_subtask_cls_state_std",
+            torch.tensor(np.asarray(cls_std), dtype=torch.float32),
+            persistent=False,
+        )
+        # Dataset state min/max (to invert the policy's MIN_MAX [-1, 1] normalization).
+        if config.subtask_dataset_state_stats_path is None:
+            raise ValueError(
+                "use_subtask_classifier=True requires `subtask_dataset_state_stats_path` "
+                "(same JSON as `--dataset.stats_override_path`) to denormalize state."
+            )
+        import json
+        with open(config.subtask_dataset_state_stats_path) as f:
+            stats = json.load(f)
+        s = stats["observation.state"]
+        self.register_buffer(
+            "_subtask_ds_state_min",
+            torch.tensor(s["min"], dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_subtask_ds_state_max",
+            torch.tensor(s["max"], dtype=torch.float32),
+            persistent=False,
+        )
+        # Optional precomputed per-frame prev_subtask lookup (shift & boundary baked in).
+        if config.subtask_prev_array_path is not None:
+            arr = np.load(config.subtask_prev_array_path)
+            self.register_buffer(
+                "_subtask_prev_lookup",
+                torch.from_numpy(arr.astype(np.int64)),
+                persistent=False,
+            )
+        # Rolling prev_subtask buffer for inference (scalar tensor, expanded per batch).
+        self.register_buffer(
+            "_subtask_rolling_prev",
+            torch.zeros(1, dtype=torch.long),
+            persistent=False,
+        )
+        # Pick the camera key (default: first image feature).
+        image_keys = list(self.config.image_features.keys())
+        key = config.subtask_classifier_image_key or image_keys[0]
+        if key not in image_keys:
+            raise ValueError(
+                f"subtask_classifier_image_key='{key}' not in image_features {image_keys}"
+            )
+        self._subtask_img_idx = image_keys.index(key)
+
+    def reset_subtask_state(self) -> None:
+        """Reset the rolling prev_subtask buffer used at inference."""
+        if self.subtask_classifier is not None:
+            self._subtask_rolling_prev.zero_()
+
+    def _run_subtask_classifier(
+        self, batch: dict[str, Tensor], batch_size: int, n_obs_steps: int
+    ) -> Tensor:
+        """Returns softmax probabilities of shape (B, n_obs_steps, n_classes)."""
+        # Image: pick configured camera, preprocess to match classifier training.
+        imgs = batch[OBS_IMAGES][:, :, self._subtask_img_idx]  # (B, S, C, H, W)
+        bs, ns = imgs.shape[:2]
+        imgs = imgs.reshape(bs * ns, *imgs.shape[2:])
+        imgs = F.interpolate(imgs, size=(224, 224), mode="bilinear", align_corners=False)
+        means = imgs.mean(dim=(-2, -1), keepdim=True)
+        imgs = (imgs * (means.mean(dim=-3, keepdim=True) / (means + 1e-6))).clamp(0, 1)
+        imgs = (imgs - self._subtask_img_mean.to(imgs.dtype)) / self._subtask_img_std.to(imgs.dtype)
+
+        # State: invert policy MIN_MAX[-1,1] -> raw, then renormalize with classifier stats.
+        # batch[OBS_STATE] has shape (B, S, state_dim); use raw (pre-slicing) state here so the
+        # classifier sees the full proprio it was trained on.
+        norm_state = batch[OBS_STATE]
+        ds_min = self._subtask_ds_state_min.to(norm_state.dtype)
+        ds_max = self._subtask_ds_state_max.to(norm_state.dtype)
+        raw_state = (norm_state + 1.0) * 0.5 * (ds_max - ds_min) + ds_min
+        cls_state = (raw_state - self._subtask_cls_state_mean.to(norm_state.dtype)) / (
+            self._subtask_cls_state_std.to(norm_state.dtype) + 1e-6
+        )
+        cls_state = cls_state.reshape(bs * ns, -1)
+
+        # prev_subtask: lookup at training (if available), rolling argmax at inference.
+        cls_prev = self._prev_subtask_for_batch(batch, bs, ns, imgs.device)
+
+        with torch.no_grad():
+            cls_logits = self.subtask_classifier(imgs, cls_state, cls_prev)
+        cls_probs = F.softmax(cls_logits, dim=-1)
+
+        # Update rolling argmax buffer at inference (assumes batch_size=1 rollouts).
+        if not self.training:
+            self._subtask_rolling_prev = cls_probs.argmax(dim=-1).detach()[:1].clone()
+        return cls_probs.reshape(bs, ns, -1)
+
+    def _prev_subtask_for_batch(
+        self, batch: dict[str, Tensor], bs: int, ns: int, device: torch.device
+    ) -> Tensor:
+        """Returns int64 tensor of shape (bs*ns,) holding the previous-frame subtask label."""
+        n_classes = self.config.subtask_classifier_n_classes
+        if self.training and hasattr(self, "_subtask_prev_lookup") and "index" in batch:
+            idx = batch["index"]
+            if idx.ndim == 1:
+                idx = idx.unsqueeze(-1).expand(-1, ns)
+            flat_idx = idx.long().clamp_min(0).reshape(-1)
+            lookup = self._subtask_prev_lookup.to(device)
+            return lookup[flat_idx].clamp(0, n_classes - 1).long()
+        # Rollout (or training without lookup): use the rolling argmax buffer.
+        return self._subtask_rolling_prev.to(device).expand(bs * ns).clone()
+
     def _prepare_global_conditioning(self, batch: dict[str, Tensor]) -> Tensor:
         """Encode image features and concatenate them all together along with the state vector."""
         batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
@@ -310,6 +456,11 @@ class DiffusionModel(nn.Module):
 
         if self.config.env_state_feature:
             global_cond_feats.append(batch[OBS_ENV_STATE])
+
+        # Subtask classifier: append per-obs-step N-class softmax probs.
+        if self.subtask_classifier is not None:
+            cls_probs = self._run_subtask_classifier(batch, batch_size, n_obs_steps)
+            global_cond_feats.append(cls_probs)
 
         # Concatenate features then flatten to (B, global_cond_dim).
         return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
