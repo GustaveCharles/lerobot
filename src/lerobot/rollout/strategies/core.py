@@ -19,6 +19,7 @@ from __future__ import annotations
 import abc
 import logging
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from lerobot.datasets.utils import DEFAULT_VIDEO_FILE_SIZE_IN_MB
@@ -271,6 +272,7 @@ def send_next_action(
     obs_raw: dict,
     ctx: RolloutContext,
     interpolator: ActionInterpolator,
+    action_postprocess: Callable[[dict], dict] | None = None,
 ) -> dict | None:
     """Dispatch the next action to the robot.
 
@@ -278,6 +280,12 @@ def send_next_action(
     interpolator, and sends the interpolated action through the
     ``robot_action_processor`` to the robot.  Works identically for
     sync and async backends — the rollout strategy never needs to branch.
+
+    ``action_postprocess`` is an optional hook applied to the policy action
+    dict *before* it goes through ``robot_action_processor`` and reaches
+    ``send_action``.  Used by ``BaseStrategy`` to re-add per-motor joint
+    offsets so the robot receives real-frame coordinates.  Must return a
+    dict with the same keys.
 
     Returns the action dict that was sent, or ``None`` if no action was
     ready (e.g. empty async queue, interpolator not yet primed).
@@ -299,6 +307,8 @@ def send_next_action(
     if len(interp) != len(ordered_keys):
         raise ValueError(f"Interpolated tensor length ({len(interp)}) != action keys ({len(ordered_keys)})")
     action_dict = {k: interp[i].item() for i, k in enumerate(ordered_keys)}
+    if action_postprocess is not None:
+        action_dict = action_postprocess(action_dict)
     processed = ctx.processors.robot_action_processor((action_dict, obs_raw))
     ctx.hardware.robot_wrapper.send_action(processed)
     return action_dict

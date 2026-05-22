@@ -506,7 +506,8 @@ class DiffusionRgbEncoder(nn.Module):
         else:
             self.do_crop = False
 
-        # Grayworld / grayscale preprocessing.
+        # Optional preprocessing applied after resize+crop, before the backbone.
+        # Mirrors multi_task_dit's pipeline (grayworld -> grayscale).
         self.do_grayworld = config.image_grayworld
         if config.image_grayscale:
             self.do_grayscale = True
@@ -552,6 +553,17 @@ class DiffusionRgbEncoder(nn.Module):
         self.out = nn.Linear(config.spatial_softmax_num_keypoints * 2, self.feature_dim)
         self.relu = nn.ReLU()
 
+    @staticmethod
+    def _grayworld_normalize(images: Tensor) -> Tensor:
+        """Per-frame channel-wise white-balance: rescale each channel so all channel means match.
+
+        Implementation mirrors multi_task_dit.modeling_multi_task_dit._grayworld_normalize.
+        """
+        channel_means = images.mean(dim=(-2, -1), keepdim=True)
+        overall_mean = channel_means.mean(dim=-3, keepdim=True)
+        scale = overall_mean / (channel_means + 1e-6)
+        return (images * scale).clamp(0, 1)
+
     def forward(self, x: Tensor) -> Tensor:
         """
         Args:
@@ -559,7 +571,7 @@ class DiffusionRgbEncoder(nn.Module):
         Returns:
             (B, D) image feature.
         """
-        # Preprocess: resize if configured, then crop if configured.
+        # Preprocess: resize -> crop -> grayworld -> grayscale (mirrors multi_task_dit).
 
         if self.resize is not None:
             x = self.resize(x)
@@ -570,8 +582,7 @@ class DiffusionRgbEncoder(nn.Module):
                 # Always use center crop for eval.
                 x = self.center_crop(x)
         if self.do_grayworld:
-            means = x.mean(dim=(-2, -1), keepdim=True)
-            x = (x * (means.mean(dim=-3, keepdim=True) / (means + 1e-6))).clamp(0, 1)
+            x = self._grayworld_normalize(x)
         if self.do_grayscale:
             x = self.grayscale(x)
         # Extract backbone feature.

@@ -47,6 +47,28 @@ class BaseStrategy(RolloutStrategy):
         interpolator = self._interpolator
 
         control_interval = interpolator.get_control_interval(cfg.fps)
+        offset_motors = getattr(cfg.strategy, "offset_motors", ["shoulder_pan", "wrist_roll"])
+
+        # Auto-capture per-motor offsets from the first observation.
+        # The operator positions the arm to match the rotated towel; each
+        # motor's initial reading becomes its individual offset:
+        #   obs[motor] -= offset[motor]   → policy sees training-like values
+        #   action[motor] += offset[motor] → converts back to real-world angles
+        # joint_offset (manual) is an optional uniform additive correction on top.
+        manual_delta = getattr(cfg.strategy, "joint_offset", 0.0)
+        init_obs = robot.get_observation()
+        offsets: dict[str, float] = {}
+        for motor in offset_motors:
+            key = f"{motor}.pos"
+            if key in init_obs:
+                offsets[key] = init_obs[key] + manual_delta
+                logger.info("Joint offset  %s = %.2f deg  (auto=%.2f  manual=%.2f)",
+                            key, offsets[key], init_obs[key], manual_delta)
+
+        def _apply_offsets(ad: dict) -> dict:
+            if not offsets:
+                return ad
+            return {k: (v + offsets[k]) if k in offsets else v for k, v in ad.items()}
 
         start_time = time.perf_counter()
         engine.resume()
@@ -60,12 +82,17 @@ class BaseStrategy(RolloutStrategy):
                 break
 
             obs = robot.get_observation()
+            for key, offset in offsets.items():
+                if key in obs:
+                    obs[key] = obs[key] - offset
             obs_processed = self._process_observation_and_notify(ctx.processors, obs)
 
             if self._handle_warmup(cfg.use_torch_compile, loop_start, control_interval):
                 continue
 
-            action_dict = send_next_action(obs_processed, obs, ctx, interpolator)
+            action_dict = send_next_action(
+                obs_processed, obs, ctx, interpolator, action_postprocess=_apply_offsets
+            )
             self._log_telemetry(obs_processed, action_dict, ctx.runtime)
 
             dt = time.perf_counter() - loop_start

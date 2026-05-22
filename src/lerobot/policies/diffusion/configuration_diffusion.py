@@ -149,11 +149,14 @@ class DiffusionConfig(PreTrainedConfig):
     crop_shape: tuple[int, int] | None = None
     crop_is_random: bool = True
     pretrained_backbone_weights: str | None = None
+    # Optional preprocessing applied AFTER resize+crop, BEFORE the backbone.
+    # Order: grayworld -> grayscale. Mirrors the multi_task_dit policy's pipeline so
+    # both policies can be trained on the same dataset with identical image preprocessing.
+    image_grayworld: bool = False  # Gray-world white-balance normalisation (train AND inference)
+    image_grayscale: bool = False  # Convert to grayscale 3-ch output (train AND inference, after grayworld)
     use_group_norm: bool = True
     spatial_softmax_num_keypoints: int = 32
     use_separate_rgb_encoder_per_camera: bool = False
-    image_grayworld: bool = False  # Gray-world white-balance normalisation (train AND inference)
-    image_grayscale: bool = False  # Convert to grayscale 3-ch output (train AND inference, after grayworld)
     # Unet.
     down_dims: tuple[int, ...] = (512, 1024, 2048)
     kernel_size: int = 5
