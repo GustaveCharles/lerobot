@@ -24,9 +24,44 @@ import torch
 
 from lerobot.configs import PipelineFeatureType, PolicyFeature
 from lerobot.configs.types import FeatureType
-from lerobot.processor.pipeline import ProcessorStep
+from lerobot.processor.pipeline import ProcessorStep, ProcessorStepRegistry
 from lerobot.types import EnvTransition, TransitionKey
 from lerobot.utils.constants import ACTION
+
+DEFAULT_EEF_DATASET_REPO = "gaspardthrl/walleed_fold_combined"
+
+
+def resolve_eef_sidecar_path(
+    path: str | None,
+    *,
+    dataset_repo_id: str = DEFAULT_EEF_DATASET_REPO,
+) -> str | None:
+    """Return a local path to an EEF sidecar file, downloading from HF if missing."""
+    if not path:
+        return None
+    local = Path(path)
+    if local.is_file():
+        return str(local.resolve())
+    local.parent.mkdir(parents=True, exist_ok=True)
+    hf_name = f"meta/{local.name}"
+    local_dir = local.parent.parent if local.parent.name == "meta" else local.parent
+    try:
+        from huggingface_hub import hf_hub_download
+
+        hf_hub_download(
+            repo_id=dataset_repo_id,
+            filename=hf_name,
+            repo_type="dataset",
+            local_dir=str(local_dir),
+        )
+    except Exception as exc:
+        raise FileNotFoundError(
+            f"EEF sidecar '{path}' not found locally and could not download "
+            f"'{hf_name}' from dataset '{dataset_repo_id}': {exc}"
+        ) from exc
+    if not local.is_file():
+        raise FileNotFoundError(f"Downloaded EEF sidecar missing at expected path: {local}")
+    return str(local.resolve())
 
 
 # ── Rotation helpers ──────────────────────────────────────────────────────────
@@ -62,6 +97,7 @@ def sixd_to_rotmat(v: torch.Tensor) -> torch.Tensor:
 
 # ── Input processor (pre-normalization) ──────────────────────────────────────
 
+@ProcessorStepRegistry.register("eef_action_processor")
 class EEFActionProcessorStep(ProcessorStep):
     """Replace joint actions with normalized chunk-wise EEF delta actions.
 
@@ -74,32 +110,56 @@ class EEFActionProcessorStep(ProcessorStep):
         This aligns with how LeRobot builds batches (action_delta_indices=[0..31]).
     """
 
-    def __init__(self, eef_poses_path: str, eef_stats_path: str, horizon: int = 32):
+    def __init__(
+        self,
+        eef_poses_path: str | None = None,
+        eef_stats_path: str | None = None,
+        horizon: int = 32,
+        **_: Any,
+    ):
         self.horizon = horizon
+        self.eef_poses_path = eef_poses_path
+        self.eef_stats_path = eef_stats_path
+        self._eef_poses: torch.Tensor | None = None
+        self._pos_mean = self._pos_std = self._rot_mean = self._rot_std = None
+        self._g_min = self._g_max = None
+        self._training_assets_loaded = False
 
-        # Load precomputed poses once at init (small: ~16 MB for 460K rows)
-        poses_np = np.load(eef_poses_path).astype(np.float32)
-        self._eef_poses = torch.from_numpy(poses_np)  # (N, 12): [pos(3), rotmat(9)]
-
-        with open(eef_stats_path) as f:
-            stats = json.load(f)
-
-        self._pos_mean = torch.tensor(stats["eef_pos_delta"]["mean"], dtype=torch.float32)
-        self._pos_std  = torch.tensor(stats["eef_pos_delta"]["std"],  dtype=torch.float32)
-        self._rot_mean = torch.tensor(stats["eef_rot_delta"]["mean"], dtype=torch.float32)
-        self._rot_std  = torch.tensor(stats["eef_rot_delta"]["std"],  dtype=torch.float32)
-        g = stats["gripper"]
-        self._g_min = float(g["min"])
-        self._g_max = float(g["max"])
+    def _load_training_assets(self) -> None:
+        if self._training_assets_loaded:
+            return
+        stats_path = resolve_eef_sidecar_path(self.eef_stats_path)
+        poses_path = resolve_eef_sidecar_path(self.eef_poses_path)
+        if stats_path is not None:
+            with open(stats_path) as f:
+                stats = json.load(f)
+            self._pos_mean = torch.tensor(stats["eef_pos_delta"]["mean"], dtype=torch.float32)
+            self._pos_std = torch.tensor(stats["eef_pos_delta"]["std"], dtype=torch.float32)
+            self._rot_mean = torch.tensor(stats["eef_rot_delta"]["mean"], dtype=torch.float32)
+            self._rot_std = torch.tensor(stats["eef_rot_delta"]["std"], dtype=torch.float32)
+            g = stats["gripper"]
+            self._g_min = float(g["min"])
+            self._g_max = float(g["max"])
+        if poses_path is not None:
+            poses_np = np.load(poses_path).astype(np.float32)
+            self._eef_poses = torch.from_numpy(poses_np)
+        self._training_assets_loaded = True
 
     def _to_device(self, device: torch.device, dtype: torch.dtype) -> None:
-        self._eef_poses = self._eef_poses.to(device=device, dtype=dtype)
-        self._pos_mean  = self._pos_mean.to(device=device, dtype=dtype)
-        self._pos_std   = self._pos_std.to(device=device, dtype=dtype)
-        self._rot_mean  = self._rot_mean.to(device=device, dtype=dtype)
-        self._rot_std   = self._rot_std.to(device=device, dtype=dtype)
+        if self._eef_poses is not None:
+            self._eef_poses = self._eef_poses.to(device=device, dtype=dtype)
+        if self._pos_mean is not None:
+            self._pos_mean = self._pos_mean.to(device=device, dtype=dtype)
+            self._pos_std = self._pos_std.to(device=device, dtype=dtype)
+            self._rot_mean = self._rot_mean.to(device=device, dtype=dtype)
+            self._rot_std = self._rot_std.to(device=device, dtype=dtype)
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
+        if self.eef_poses_path is None:
+            return transition
+        self._load_training_assets()
+        if self._eef_poses is None:
+            return transition
         comp = transition.get(TransitionKey.COMPLEMENTARY_DATA) or {}
         global_indices = comp.get("index")  # (B,) int tensor
 
@@ -166,6 +226,7 @@ class EEFActionProcessorStep(ProcessorStep):
 
 # ── Output processor (post un-normalization) ─────────────────────────────────
 
+@ProcessorStepRegistry.register("eef_unnormalize_processor")
 class EEFUnnormalizeProcessorStep(ProcessorStep):
     """Un-normalize 10-D EEF delta action.
 
@@ -176,17 +237,21 @@ class EEFUnnormalizeProcessorStep(ProcessorStep):
     for robot execution.
     """
 
-    def __init__(self, eef_stats_path: str):
-        with open(eef_stats_path) as f:
-            stats = json.load(f)
-
-        self._pos_mean = torch.tensor(stats["eef_pos_delta"]["mean"], dtype=torch.float32)
-        self._pos_std  = torch.tensor(stats["eef_pos_delta"]["std"],  dtype=torch.float32)
-        self._rot_mean = torch.tensor(stats["eef_rot_delta"]["mean"], dtype=torch.float32)
-        self._rot_std  = torch.tensor(stats["eef_rot_delta"]["std"],  dtype=torch.float32)
-        g = stats["gripper"]
-        self._g_min = float(g["min"])
-        self._g_max = float(g["max"])
+    def __init__(self, eef_stats_path: str | None = None, **_: Any):
+        self.eef_stats_path = eef_stats_path
+        self._pos_mean = self._pos_std = self._rot_mean = self._rot_std = None
+        self._g_min = self._g_max = None
+        if eef_stats_path:
+            stats_path = resolve_eef_sidecar_path(eef_stats_path)
+            with open(stats_path) as f:
+                stats = json.load(f)
+            self._pos_mean = torch.tensor(stats["eef_pos_delta"]["mean"], dtype=torch.float32)
+            self._pos_std = torch.tensor(stats["eef_pos_delta"]["std"], dtype=torch.float32)
+            self._rot_mean = torch.tensor(stats["eef_rot_delta"]["mean"], dtype=torch.float32)
+            self._rot_std = torch.tensor(stats["eef_rot_delta"]["std"], dtype=torch.float32)
+            g = stats["gripper"]
+            self._g_min = float(g["min"])
+            self._g_max = float(g["max"])
 
     def _to_device(self, device: torch.device, dtype: torch.dtype) -> None:
         for attr in ("_pos_mean", "_pos_std", "_rot_mean", "_rot_std"):

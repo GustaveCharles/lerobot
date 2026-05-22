@@ -278,6 +278,30 @@ def make_pre_post_processors(
             kwargs["preprocessor_overrides"] = preprocessor_overrides
             kwargs["postprocessor_overrides"] = postprocessor_overrides
 
+        if isinstance(policy_cfg, DiffusionConfig) and policy_cfg.use_eef_actions:
+            from lerobot.processor.eef_action_processor import resolve_eef_sidecar_path
+
+            stats_path = resolve_eef_sidecar_path(policy_cfg.eef_stats_path)
+            pre_overrides = dict(kwargs.get("preprocessor_overrides") or {})
+            post_overrides = dict(kwargs.get("postprocessor_overrides") or {})
+            eef_pre_cfg = {
+                "horizon": policy_cfg.horizon,
+                "eef_poses_path": None,
+                "eef_stats_path": None,
+            }
+            for key in ("EEFActionProcessorStep", "eef_action_processor"):
+                if key in pre_overrides:
+                    eef_pre_cfg = {**eef_pre_cfg, **pre_overrides.pop(key)}
+            pre_overrides["EEFActionProcessorStep"] = eef_pre_cfg
+
+            eef_post_cfg = {"eef_stats_path": stats_path}
+            for key in ("EEFUnnormalizeProcessorStep", "eef_unnormalize_processor"):
+                if key in post_overrides:
+                    eef_post_cfg = {**eef_post_cfg, **post_overrides.pop(key)}
+            post_overrides["EEFUnnormalizeProcessorStep"] = eef_post_cfg
+            kwargs["preprocessor_overrides"] = pre_overrides
+            kwargs["postprocessor_overrides"] = post_overrides
+
         preprocessor = PolicyProcessorPipeline.from_pretrained(
             pretrained_model_name_or_path=pretrained_path,
             config_filename=kwargs.get(
