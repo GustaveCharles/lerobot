@@ -65,6 +65,11 @@ class BaseStrategy(RolloutStrategy):
                 logger.info("Joint offset  %s = %.2f deg  (auto=%.2f  manual=%.2f)",
                             key, offsets[key], init_obs[key], manual_delta)
 
+        def _apply_offsets(ad: dict) -> dict:
+            if not offsets:
+                return ad
+            return {k: (v + offsets[k]) if k in offsets else v for k, v in ad.items()}
+
         start_time = time.perf_counter()
         engine.resume()
         logger.info("Base strategy control loop started")
@@ -85,10 +90,9 @@ class BaseStrategy(RolloutStrategy):
             if self._handle_warmup(cfg.use_torch_compile, loop_start, control_interval):
                 continue
 
-            action_dict = send_next_action(obs_processed, obs, ctx, interpolator)
-            for key, offset in offsets.items():
-                if key in action_dict:
-                    action_dict[key] = action_dict[key] + offset
+            action_dict = send_next_action(
+                obs_processed, obs, ctx, interpolator, action_postprocess=_apply_offsets
+            )
             self._log_telemetry(obs_processed, action_dict, ctx.runtime)
 
             dt = time.perf_counter() - loop_start
